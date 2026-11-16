@@ -157,6 +157,19 @@ Executed against PHP 8.2.12 and MariaDB 10.4.32.
 | S03 | Login throttling | Reach eight failed attempts from one IP, then send a valid password. | The next attempt returns 429. | The valid-password attempt returned 429 after the eighth failure. | PASS |
 | B01 | Presentation flow and responsive layout | Run the walkthrough through Chromium against the seeded MariaDB database. Check dashboard widths of 1280, 768 and 390 px and the gate screen at 390 px. | Demo tour, sign-in, zone CRUD, visitor entry and checkout, audit and reports work. Views fit their widths. | Visitor Parking went from 12 to 11 and back to 12. The ID reminder and audit events appeared. The checked views had no horizontal overflow or uncaught JavaScript errors. | PASS |
 
+### November 16, 2026 verification
+
+| Environment | Method | Observed result |
+| --- | --- | --- |
+| Local XAMPP MariaDB 10.4.32 | Reran `tests.php` against a newly created isolated test schema. | 11 passed, 0 failed. |
+| GitHub Actions with MariaDB 10.11 | Manually dispatched **validate**. The runner linted all tracked PHP and JavaScript and ran `tests.php`. | 11 passed, 0 failed. The competing check-ins returned HTTP 200 and 409. |
+| Hosted HTTPS demo | Drove the tagged build through a clean Chromium session. Checked four account roles, admin zone CRUD, visitor check-in and checkout, the ID reminder, audit, reports, and three viewport widths. | Visitor Parking went from 12 to 11 and back to 12. No horizontal overflow or uncaught browser errors. The session cookie was Secure and HttpOnly. The tunnel returned 404 for phpMyAdmin, the schema file and Git configuration. |
+| Codex smoke run | Manually dispatched **agent-smoke** on GitHub Actions. | Stopped at the credential check. An `OPENAI_API_KEY` Actions secret is required to verify a Codex edit. |
+
+The [validation run](https://github.com/teddexter0/strathmore-smart-parking/actions/runs/43944931025), [hosted demo run](https://github.com/teddexter0/strathmore-smart-parking/actions/runs/43945396488), and [Codex smoke run](https://github.com/teddexter0/strathmore-smart-parking/actions/runs/43945406379) retain the execution record.
+
+To create another temporary HTTPS demo, dispatch **Temporary parking demo** in Actions as the repository owner. The run uses the fixed presentation tag, seeds a fresh MariaDB service and publishes the verified URL in the `parking-demo-url` artifact. The URL is available for approximately two hours after setup.
+
 ## Operating limits
 
 - An officer’s entry, exit or correction changes occupancy. A driver may park in a different zone from the recorded assignment. Real deployment would require consistent gate procedures and could add zone-entrance verification.
