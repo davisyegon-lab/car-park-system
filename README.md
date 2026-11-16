@@ -36,6 +36,8 @@ All four fictional accounts use `ParkingDemo26!`. The database stores bcrypt has
 
 ## Presentation walkthrough
 
+The dashboard shows a map of zone occupancy. Green tiles represent availability and red tiles represent occupied capacity. The tiles are a schematic. The numbers above the tiles show exact database totals. At the gate, selecting a zone highlights an available tile in yellow. Check-in records the assignment and refreshes the count. Check-out opens capacity again. On narrower screens, use **Menu** to switch between the views available to your role.
+
 1. Open **Demo tour** and sign in as the student. Show Visitor Parking at 12 available on a fresh database.
 2. Sign out and sign in as the administrator. In **Administration → Zones**, create a temporary zone, change its capacity and delete it while it has no session history.
 3. Sign out and sign in as security. In **Gate operations**, choose **Visitor**. Enter Quinn Demo, Interview, Careers Office and `DEMO701`. Select Visitor Parking. For the walkthrough, mark the physical ID inspected and retained.
@@ -168,7 +170,7 @@ Executed against PHP 8.2.12 and MariaDB 10.4.32.
 
 The [validation run](https://github.com/teddexter0/strathmore-smart-parking/actions/runs/43944931025), [hosted demo run](https://github.com/teddexter0/strathmore-smart-parking/actions/runs/43945396488), and [Codex smoke run](https://github.com/teddexter0/strathmore-smart-parking/actions/runs/43945406379) retain the execution record.
 
-To create another temporary HTTPS demo, dispatch **Temporary parking demo** in Actions as the repository owner. The run uses the fixed presentation tag, seeds a fresh MariaDB service and publishes the verified URL in the `parking-demo-url` artifact. The URL is available for approximately two hours after setup.
+To create another temporary HTTPS demo, dispatch [**Temporary parking demo**](https://github.com/teddexter0/car-park-system/actions/workflows/parking-demo.yml) in Actions as the repository owner. The run uses `v0.2.0-demo`, seeds a fresh MariaDB service and publishes the verified URL in the `parking-demo-url` artifact. The URL is available for approximately two hours after setup.
 
 ## Operating limits
 
@@ -183,4 +185,4 @@ The `v0.1.0-demo` tag identifies the tested presentation build. The Parking deve
 
 Each development run starts at the latest validated milestone and pushes a date-specific `codex/parking/YYYY-MM-DD` branch after PHP and JavaScript lint and the MariaDB integration suite pass at every commit. The milestone plan targets about 30 commits across the week. Each branch carries its own development log and test evidence.
 
-Use the workflow's manual **validate** mode to test the app on GitHub. **agent-smoke** tests an actual Codex edit without publishing a branch. Codex modes require a funded OpenAI project key in the repository Actions secret `OPENAI_API_KEY`.
+Use the workflow's manual **validate** mode to test the app on GitHub. **agent-smoke** tests an actual Codex edit without publishing a branch. Codex modes require an OpenAI project key in the repository Actions secret `OPENAI_API_KEY`. With no key configured, the daily schedule runs validation.

@@ -13,14 +13,22 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
     <script src="app.js" defer></script>
 </head>
 <body>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v5c0 5-3.1 8-8 10-4.9-2-8-5-8-10V6l8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h7m4 0h5M4 17h3m4 0h9"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+    <symbol id="i-car" viewBox="0 0 24 24"><path d="M5 16v3m14-3v3M4 12l2-6h12l2 6v4H4v-4Zm0 0h16M7 14h2m6 0h2"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+</svg>
 <a class="skip" href="#main">Skip to content</a>
 <header class="header">
     <div class="header-inner">
         <div class="brand"><span class="mark" aria-hidden="true">P</span><div><strong>Strathmore Smart Parking</strong><small>Parking &amp; access management</small></div></div>
-        <nav id="navigation" aria-label="Main navigation" hidden>
-            <button class="nav-button" data-screen="dashboard">Dashboard</button>
-            <button class="nav-button" data-screen="gate" hidden>Gate operations</button>
-            <button class="nav-button" data-screen="admin" hidden>Administration</button>
+        <button id="menu-toggle" type="button" aria-expanded="false" aria-controls="navigation" hidden><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg> Menu</button>
+        <nav id="navigation" aria-label="Main navigation" data-open="false" hidden>
+            <button class="nav-button" data-screen="dashboard"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Dashboard</button>
+            <button class="nav-button" data-screen="gate" hidden><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Gate operations</button>
+            <button class="nav-button" data-screen="admin" hidden><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg> Administration</button>
         </nav>
         <div class="header-actions">
             <button id="tour-button" class="quiet" type="button">Demo tour</button>
@@ -34,7 +42,11 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
         <div class="login-intro">
             <p class="eyebrow">Unofficial academic prototype</p>
             <h1 id="login-title">Campus parking</h1>
-            <p>See available spaces by zone. Gate officers record vehicle arrivals and departures.</p>
+            <p>See which zones have room. At the gate, record arrivals, assign a zone and check vehicles out.</p>
+            <div class="entry-illustration" aria-hidden="true">
+                <div class="entry-bays"><span></span><span></span><span><svg class="icon"><use href="#i-car"/></svg></span><span></span></div>
+                <div class="entry-lane"><span></span><svg class="icon"><use href="#i-car"/></svg></div>
+            </div>
         </div>
         <form id="login-form" class="panel login-form">
             <h2>Sign in</h2>
@@ -42,7 +54,7 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
             <label>Email <input required type="email" name="email" autocomplete="username" maxlength="150" placeholder="student@parking.test"></label>
             <label>Password <input required type="password" name="password" autocomplete="current-password" maxlength="72"></label>
             <button type="submit" class="primary">Sign in</button>
-            <details id="demo-credentials" hidden><summary>Local demo credentials</summary>
+            <details id="demo-credentials" data-public="<?= getenv('PARKING_PUBLIC_DEMO') === '1' ? 'true' : 'false' ?>" hidden><summary>Demo credentials</summary>
                 <p>Password for each role <strong>ParkingDemo26!</strong></p>
                 <div class="demo-picks">
                     <button type="button" data-demo="student">Student</button><button type="button" data-demo="staff">Staff</button>
@@ -52,17 +64,22 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
         </form>
     </section>
     <section id="dashboard-screen" class="screen" aria-labelledby="dashboard-title" hidden>
-        <div class="page-heading">
+        <div class="page-heading dashboard-banner">
             <div><p class="eyebrow" id="identity"></p><h1 id="dashboard-title">Parking availability</h1>
                 <p>First come, first served. Availability is based on vehicle movements recorded at the gate.</p></div>
-            <small id="updated" class="pill"></small>
+            <div class="dashboard-actions">
+                <button type="button" id="open-gate" data-open-screen="gate" hidden><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Open gate desk</button>
+                <small id="updated" class="pill"></small>
+            </div>
         </div>
         <div id="dashboard-stats" class="stats"></div>
-        <div class="section-heading"><h2>Parking zones</h2><span class="muted">Fictional campus zones</span></div>
+        <div class="section-heading zone-heading"><div><h2>Parking zone map</h2><p class="muted">Zone totals from the gate. The tiles show a schematic of occupancy.</p></div>
+            <ul class="map-legend" aria-label="Parking status key"><li class="available-key">Available</li><li class="pending-key">Assigning</li><li class="occupied-key">Occupied</li></ul>
+        </div>
         <div id="dashboard-zones" class="zone-grid"></div>
     </section>
     <section id="gate-screen" class="screen" aria-labelledby="gate-title" hidden>
-        <div class="page-heading"><div><p class="eyebrow">Security desk</p><h1 id="gate-title">Gate operations</h1><p>Record arrivals, departures and changes to a vehicle’s recorded zone.</p></div></div>
+        <div class="page-heading desk-heading"><span class="desk-symbol"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><div><p class="eyebrow">Security desk</p><h1 id="gate-title">Gate operations</h1><p>Check vehicles in on the left. Search active sessions to check out or transfer a vehicle.</p></div></div>
         <div class="gate-grid">
             <form id="checkin-form" class="panel">
                 <h2>Check in a vehicle</h2>
@@ -80,6 +97,11 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
                 </fieldset>
                 <label>Vehicle registration <input required name="vehicle_plate" maxlength="32" placeholder="DEMO701"></label>
                 <label>Parking zone <select name="zone_id" id="checkin-zone" required></select></label>
+                <div class="assignment-preview" aria-labelledby="assignment-title">
+                    <div class="assignment-heading"><svg class="icon" aria-hidden="true"><use href="#i-car"/></svg><strong id="assignment-title">Parking assignment</strong></div>
+                    <p id="assignment-state" role="status">Choose a zone to preview the assignment.</p>
+                    <div id="assignment-map"></div>
+                </div>
                 <button type="submit" class="primary">Check in</button>
             </form>
             <section class="panel">

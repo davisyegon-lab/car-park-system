@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: v0.1.0-demo
+          ref: v0.2.0-demo
           persist-credentials: false
       - uses: shivammathur/setup-php@v2
         with:
@@ -40,6 +40,7 @@ jobs:
         env:
           PARKING_DB_PORT: ${{ job.services.mariadb.ports[3306] }}
           PARKING_DB_PASSWORD: isolated-demo-container
+          PARKING_PUBLIC_DEMO: '1'
         run: |
           set -euo pipefail
           export MYSQL_PWD="$PARKING_DB_PASSWORD"

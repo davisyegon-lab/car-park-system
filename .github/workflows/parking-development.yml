@@ -36,6 +36,7 @@ jobs:
         env:
           REQUEST: ${{ inputs.mode }}
           EVENT: ${{ github.event_name }}
+          CODEX_ENABLED: ${{ secrets.OPENAI_API_KEY != '' }}
         run: |
           set -euo pipefail
           day=$(TZ=Africa/Nairobi date +%F)
@@ -46,6 +47,8 @@ jobs:
             retire=true
           elif [[ "$REQUEST" == validate || "$REQUEST" == agent-smoke ]]; then
             mode=$REQUEST
+          elif [[ "$EVENT" == schedule && "$CODEX_ENABLED" != true && "$day" > 2026-11-16 && "$day" < 2026-11-24 ]]; then
+            mode=validate
           elif [[ "$day" > 2026-11-16 && "$day" < 2026-11-24 ]]; then
             mode=develop
             branch=refs/remotes/origin/codex/parking/$day
