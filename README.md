@@ -163,3 +163,11 @@ Executed against PHP 8.2.12 and MariaDB 10.4.32.
 - Open sessions older than 12 hours are flagged for review. An officer must confirm departure before closing one.
 - Reports and audits display up to 100 matching records. Daily totals use East Africa Time. Reports show the session’s final recorded zone, and the audit log preserves the transfer history.
 - The app uses a simulated AMS and fictional accounts intended for an isolated local demonstration. Account management covers activation and deactivation of seeded accounts.
+
+## Scheduled development
+
+The `v0.1.0-demo` tag identifies the tested presentation build. The Parking development workflow plans a run at 19:17 East Africa Time each day from November 17 through 23, 2026. The next scheduled trigger, at 00:17 EAT on November 24, disables the workflow. The date gate also prevents scheduled development outside those seven days.
+
+Each development run starts at the latest validated milestone and pushes a date-specific `codex/parking/YYYY-MM-DD` branch after PHP and JavaScript lint and the MariaDB integration suite pass at every commit. The milestone plan targets about 30 commits across the week. Each branch carries its own development log and test evidence.
+
+Use the workflow's manual **validate** mode to test the app on GitHub. **agent-smoke** tests an actual Codex edit without publishing a branch. Codex modes require a funded OpenAI project key in the repository Actions secret `OPENAI_API_KEY`.

@@ -1,0 +1,225 @@
+name: Parking development
+
+on:
+  schedule:
+    - cron: '17 16 17-23 11 *'
+    - cron: '17 21 23 11 *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate the MVP, test Codex without publishing, or run today's milestone
+        type: choice
+        options: [validate, agent-smoke, develop]
+        default: validate
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parking-development
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      day: ${{ steps.plan.outputs.day }}
+      base: ${{ steps.plan.outputs.base }}
+      mode: ${{ steps.plan.outputs.mode }}
+      retire: ${{ steps.plan.outputs.retire }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          REQUEST: ${{ inputs.mode }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          day=$(TZ=Africa/Nairobi date +%F)
+          base=$(git rev-parse HEAD)
+          mode=skip
+          retire=false
+          if [[ "$EVENT" == schedule && "$day" > 2026-11-23 ]]; then
+            retire=true
+          elif [[ "$REQUEST" == validate || "$REQUEST" == agent-smoke ]]; then
+            mode=$REQUEST
+          elif [[ "$day" > 2026-11-16 && "$day" < 2026-11-24 ]]; then
+            mode=develop
+            branch=refs/remotes/origin/codex/parking/$day
+            if git show-ref --verify --quiet "$branch"; then
+              mode=skip
+            else
+              latest=$(git for-each-ref --sort=-refname --format='%(refname)' refs/remotes/origin/codex/parking/ |
+                awk -v day="$day" '/\/2026-11-(17|18|19|20|21|22|23)$/ {match($0, /2026-11-[0-9]+$/); if (substr($0, RSTART) < day) {print; exit}}')
+              if [[ -n "$latest" ]]; then
+                base=$(git rev-parse "$latest")
+                git merge-base --is-ancestor v0.1.0-demo "$base"
+              fi
+            fi
+          elif [[ "$REQUEST" == develop ]]; then
+            echo 'Development is limited to November 17–23, 2026 in Nairobi.' >&2
+            exit 1
+          fi
+          printf 'day=%s\nbase=%s\nmode=%s\nretire=%s\n' "$day" "$base" "$mode" "$retire" >> "$GITHUB_OUTPUT"
+
+  develop:
+    needs: plan
+    if: needs.plan.outputs.mode == 'develop' || needs.plan.outputs.mode == 'agent-smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.base }}
+          persist-credentials: false
+      - name: Confirm API secret is configured
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [[ -z "$CODEX_API_KEY" ]]; then
+            echo '::error::Set the OPENAI_API_KEY repository Actions secret before running Codex.'
+            exit 1
+          fi
+      - name: Prepare milestone prompt
+        env:
+          DAY: ${{ needs.plan.outputs.day }}
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          if [[ "$MODE" == agent-smoke ]]; then
+            printf '%s\n' 'Read the parking README. Write PARKING_CODEX_SMOKE_OK as the entire content of .parking-agent-smoke. Leave all other paths untouched.' > "$RUNNER_TEMP/parking-prompt.md"
+          else
+            printf 'Implement the milestone for %s (Africa/Nairobi).\n\n' "$DAY" > "$RUNNER_TEMP/parking-prompt.md"
+            cat .github/parking/milestones.md >> "$RUNNER_TEMP/parking-prompt.md"
+          fi
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: ${{ runner.temp }}/parking-prompt.md
+          safety-strategy: drop-sudo
+          permission-profile: ':workspace'
+          allow-users: teddexter0
+      - name: Package the agent result
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          DAY: ${{ needs.plan.outputs.day }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" == agent-smoke ]]; then
+            test "$(cat .parking-agent-smoke)" = PARKING_CODEX_SMOKE_OK
+            test "$(git status --porcelain --untracked-files=all)" = '?? .parking-agent-smoke'
+            echo 'Codex edited only the smoke-test file. No branch will be published.'
+            exit 0
+          fi
+          git show "${GITHUB_SHA}:.github/parking/package.py" > "$RUNNER_TEMP/parking-package.py" 2>/dev/null ||
+            git show HEAD:.github/parking/package.py > "$RUNNER_TEMP/parking-package.py"
+          python "$RUNNER_TEMP/parking-package.py" "$DAY" "$RUNNER_TEMP/parking.series"
+      - uses: actions/upload-artifact@v4
+        if: needs.plan.outputs.mode == 'develop'
+        with:
+          name: parking-series
+          path: ${{ runner.temp }}/parking.series
+          if-no-files-found: error
+          retention-days: 3
+
+  validate:
+    needs: [plan, develop]
+    if: >-
+      always() && !cancelled() &&
+      (needs.plan.outputs.mode == 'validate' ||
+      (needs.plan.outputs.mode == 'develop' && needs.develop.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: parking-ci-only
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306/tcp
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.base }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, curl
+          coverage: none
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.mode == 'develop'
+        with:
+          name: parking-series
+          path: ${{ runner.temp }}
+      - name: Validate PHP, JavaScript, and database behavior
+        env:
+          PARKING_DB_PORT: ${{ job.services.mariadb.ports[3306] }}
+          PARKING_DB_PASSWORD: parking-ci-only
+          BASE: ${{ needs.plan.outputs.base }}
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          set -euo pipefail
+          verify() {
+            git diff --check HEAD^ HEAD 2>/dev/null || {
+              if git rev-parse --verify -q HEAD^ >/dev/null; then return 1; fi
+              git show --format= --check HEAD
+            }
+            git ls-files -z -- '*.php' | xargs -0 -r -n1 php -l
+            git ls-files -z -- '*.js' | xargs -0 -r -n1 node --check
+            php tests.php
+          }
+          if [[ "$MODE" == develop ]]; then
+            git -c user.name=parking-ci -c user.email=parking-ci@example.invalid -c core.hooksPath=/dev/null am "$RUNNER_TEMP/parking.series"
+            git rev-list --reverse "$BASE..HEAD" > "$RUNNER_TEMP/parking-commits"
+            test -s "$RUNNER_TEMP/parking-commits"
+            while IFS= read -r commit; do
+              git switch --detach "$commit"
+              verify
+            done < "$RUNNER_TEMP/parking-commits"
+          else
+            verify
+          fi
+
+  publish:
+    needs: [plan, validate]
+    if: needs.plan.outputs.mode == 'develop' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.base }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: parking-series
+          path: ${{ runner.temp }}
+      - name: Push the validated daily branch
+        env:
+          DAY: ${{ needs.plan.outputs.day }}
+        run: |
+          set -euo pipefail
+          git -c user.name='Parking Codex automation' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' -c core.hooksPath=/dev/null am "$RUNNER_TEMP/parking.series"
+          branch="refs/heads/codex/parking/$DAY"
+          git push --force-with-lease="$branch:" origin "HEAD:$branch"
+          test "$(git ls-remote origin "$branch" | cut -f1)" = "$(git rev-parse HEAD)"
+
+  retire:
+    needs: plan
+    if: needs.plan.outputs.retire == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Disable the completed schedule
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow disable parking-development.yml
