@@ -1,0 +1,90 @@
+name: Temporary parking demo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temporary-parking-demo
+  cancel-in-progress: false
+
+jobs:
+  demo:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: isolated-demo-container
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306/tcp
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: v0.1.0-demo
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_mysql, curl
+          coverage: none
+      - name: Start the isolated PHP demo
+        env:
+          PARKING_DB_PORT: ${{ job.services.mariadb.ports[3306] }}
+          PARKING_DB_PASSWORD: isolated-demo-container
+        run: |
+          set -euo pipefail
+          export MYSQL_PWD="$PARKING_DB_PASSWORD"
+          mysql --protocol=tcp -h 127.0.0.1 -P "$PARKING_DB_PORT" -u root < database.sql
+          unset MYSQL_PWD
+          cat > "$RUNNER_TEMP/parking-router.php" <<'PHP'
+          <?php
+          $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+          if (!in_array($path, ['/', '/index.php', '/api.php', '/app.js', '/style.css'], true)) {
+              http_response_code(404);
+              return true;
+          }
+          $_SERVER['HTTPS'] = 'on';
+          return false;
+          PHP
+          php -d display_errors=0 -S 127.0.0.1:8097 -t "$GITHUB_WORKSPACE" "$RUNNER_TEMP/parking-router.php" > "$RUNNER_TEMP/parking-origin.log" 2>&1 &
+          curl -fsS --retry 6 --retry-connrefused 'http://127.0.0.1:8097/api.php?action=state' | jq -e '.user == null and (.csrf | length > 0) and (.demo == false)'
+      - name: Open and verify the temporary HTTPS URL
+        run: |
+          set -euo pipefail
+          release=$(curl -fsSL https://api.github.com/repos/cloudflare/cloudflared/releases/latest)
+          asset=$(jq -e '.assets[] | select(.name == "cloudflared-linux-amd64")' <<< "$release")
+          curl -fsSL "$(jq -er .browser_download_url <<< "$asset")" -o "$RUNNER_TEMP/cloudflared"
+          printf '%s  %s\n' "$(jq -er .digest <<< "$asset" | cut -d: -f2)" "$RUNNER_TEMP/cloudflared" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8097 > "$RUNNER_TEMP/parking-tunnel.log" 2>&1 &
+          for attempt in {1..30}; do
+            url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/parking-tunnel.log" | head -1 || true)
+            if [[ -n "$url" ]] && curl -fsS --max-time 5 "$url/api.php?action=state" | jq -e '.user == null and (.csrf | length > 0)' >/dev/null; then
+              for path in /phpmyadmin/ /database.sql /.git/config; do
+                test "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$url$path")" = 404
+              done
+              printf '%s\n' "$url" | tee "$RUNNER_TEMP/demo-url.txt"
+              printf '## Temporary demo\n\n%s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/parking-tunnel.log"
+          exit 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parking-demo-url
+          path: ${{ runner.temp }}/demo-url.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep the demo online for two hours
+        run: sleep 7200
