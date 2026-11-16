@@ -3,6 +3,8 @@
 const $ = (id) => document.getElementById(id);
 const all = (selector) => [...document.querySelectorAll(selector)];
 const roles = { student: 'Student', staff: 'Staff', security: 'Security officer', admin: 'Administrator', visitor: 'Visitor' };
+const campusZones = [[1, 'A'], [2, 'B'], [3, 'C']];
+const zoneCode = (id) => campusZones.find(([seedId]) => seedId === Number(id))?.[1] || `Z${Number(id)}`;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[c]);
@@ -78,6 +80,7 @@ function updateUser(user) {
             'zone-list', 'report-stats', 'report-zones', 'history-list', 'audit-list', 'account-list', 'action-fields', 'assignment-map']) {
             $(id).replaceChildren();
         }
+        for (const [, code] of campusZones) $(`campus-zone-${code.toLowerCase()}`).replaceChildren();
         gateZones = [];
         adminZones = [];
         activeSessions = [];
@@ -115,8 +118,8 @@ function zoneCards(id, zones) {
         [card.dataset.zoneId, Number(card.dataset.occupied)]));
     container.dataset.snapshot = signature;
     container.innerHTML = zones.map((zone) => `
-        <article class="panel zone-card" data-zone-id="${Number(zone.id)}" data-occupied="${Number(zone.occupied)}">
-            <div class="section-heading"><h3>${escape(zone.name)}</h3>
+        <article class="panel zone-card" ${id === 'dashboard-zones' ? `id="zone-${Number(zone.id)}" tabindex="-1"` : ''} data-zone-id="${Number(zone.id)}" data-occupied="${Number(zone.occupied)}">
+            <div class="section-heading"><div class="zone-title"><span class="zone-code">${zoneCode(zone.id)}</span><h3>${escape(zone.name)}</h3></div>
                 <span class="pill ${Number(zone.available) === 0 ? 'warning' : ''}">${zone.available} available</span>
             </div>
             <p class="muted">${escape(zone.description)}</p>
@@ -125,22 +128,42 @@ function zoneCards(id, zones) {
         </article>`).join('') || '<p>No active parking zones.</p>';
 }
 
+function renderCampus(zones) {
+    for (const [id, code] of campusZones) {
+        const area = $(`campus-zone-${code.toLowerCase()}`);
+        const zone = zones.find((item) => Number(item.id) === id);
+        const name = zone ? escape(zone.name) : 'Zone closed';
+        const markup = zone
+            ? `<a href="#zone-${id}" class="lot-link"><span class="zone-code">${code}</span><strong>${name}</strong><span class="lot-count ${Number(zone.available) === 0 ? 'lot-full' : ''}">${Number(zone.available)} available</span></a>`
+            : `<div class="lot-link lot-unavailable"><span class="zone-code">${code}</span><strong>${name}</strong></div>`;
+        if (area.dataset.snapshot !== markup || !area.childElementCount) {
+            area.innerHTML = markup;
+            area.dataset.snapshot = markup;
+        }
+    }
+}
+
 function parkingTiles(zone, phase, previousOccupied) {
     const capacity = Number(zone.capacity);
     const occupied = Number(zone.occupied);
-    const count = Math.min(16, capacity);
+    const count = Math.min(56, capacity);
     const occupiedTiles = (total) => total <= 0 ? 0 : total >= capacity ? count
         : Math.max(1, Math.min(count - 1, Math.round(total / capacity * count)));
     const taken = occupiedTiles(occupied);
     const previous = previousOccupied === undefined ? taken : occupiedTiles(previousOccupied);
     const marker = previousOccupied === undefined || previousOccupied === occupied ? -1
         : Math.max(0, Math.min(count - 1, occupied > previousOccupied ? taken - 1 : taken));
+    const code = zoneCode(zone.id);
     const tiles = Array.from({ length: count }, (_, i) => {
         const pending = phase === 'pending' && i === taken;
         const status = pending ? 'pending' : i < taken ? 'occupied' : 'available';
         const changed = i === marker || (i >= Math.min(taken, previous) && i < Math.max(taken, previous));
         const car = status !== 'available' ? '<svg class="icon"><use href="#i-car"/></svg>' : '';
-        return `<span class="parking-tile tile-${status}${changed ? ' tile-change' : ''}">${car}</span>`;
+        const first = Math.floor(i * capacity / count) + 1;
+        const last = Math.floor((i + 1) * capacity / count);
+        const start = `${code}${String(first).padStart(2, '0')}`;
+        const label = first === last ? start : `${start}–${last}`;
+        return `<span class="parking-tile tile-${status}${changed ? ' tile-change' : ''}">${car}<span>${label}</span></span>`;
     });
     return `<div class="parking-tiles" aria-hidden="true">${tiles.join('')}</div>`;
 }
@@ -166,6 +189,7 @@ async function loadDashboard(poll = false) {
         stats('dashboard-stats', [['Total capacity', result.capacity], ['Occupied spaces', result.occupied],
             ['Available spaces', result.available], ['Occupancy', `${result.percentage}%`]]);
         zoneCards('dashboard-zones', result.zones);
+        renderCampus(result.zones);
         $('updated').textContent = `Updated ${new Date().toLocaleTimeString([], { timeZone: 'Africa/Nairobi', hour: '2-digit', minute: '2-digit', second: '2-digit' })} EAT`;
     }
     if (screen === 'gate') {
@@ -178,7 +202,7 @@ async function loadDashboard(poll = false) {
 function availableZones(exclude = 0) {
     return gateZones.filter((zone) => Number(zone.id) !== exclude).map((zone) => ({
         id: zone.id,
-        label: `${zone.name} (${zone.available} available)`,
+        label: `${zoneCode(zone.id)} · ${zone.name} (${zone.available} available)`,
         disabled: Number(zone.available) === 0,
     }));
 }

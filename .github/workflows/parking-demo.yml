@@ -14,7 +14,7 @@ jobs:
   demo:
     if: github.actor == github.repository_owner
     runs-on: ubuntu-latest
-    timeout-minutes: 125
+    timeout-minutes: 360
     services:
       mariadb:
         image: mariadb:10.11
@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: v0.2.0-demo
+          ref: v0.3.0-demo
           persist-credentials: false
       - uses: shivammathur/setup-php@v2
         with:
@@ -87,5 +87,5 @@ jobs:
           path: ${{ runner.temp }}/demo-url.txt
           if-no-files-found: error
           retention-days: 1
-      - name: Keep the demo online for two hours
-        run: sleep 7200
+      - name: Keep the demo online for up to five hours and 45 minutes
+        run: sleep 20700

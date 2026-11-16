@@ -2,7 +2,7 @@
 
 A Software Engineering class prototype built with PHP, JavaScript and MariaDB. It shows parking availability by zone using arrivals and departures recorded at the gate. All accounts and parking records are fictional.
 
-**[Open the live demo](https://proved-wrap-version-port.trycloudflare.com)**. This temporary link is expected to expire around **1:20 a.m. EAT on November 17, 2026**. Use the local setup below once the link expires.
+Use the current demo link shared by the group or follow the XAMPP setup below.
 
 ## What each role can do
 
@@ -12,7 +12,7 @@ A Software Engineering class prototype built with PHP, JavaScript and MariaDB. I
 | Gate officer | Check vehicles in and out, record visitors, transfer vehicles between zones and correct missed checkouts. |
 | Administrator | Manage parking zones and view reports and the audit log. |
 
-Entry is first come, first served. Green tiles show available capacity, yellow previews a zone assignment and red shows occupied capacity. The map is a schematic of each zone. Availability comes from the gate records.
+Entry is first come, first served. The illustrated campus map uses the Central Building, MSB and Library as landmarks for Zones A, B and C. Green tiles show available capacity, yellow previews a zone assignment and red shows occupied capacity. The numbered bays are map labels. Gate records track occupancy by zone.
 
 ## Run with XAMPP
 

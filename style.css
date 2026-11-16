@@ -1,11 +1,11 @@
 :root {
     color-scheme: light;
     font: 16px/1.52 "Instrument Sans", "Segoe UI", system-ui, sans-serif;
-    --ink: #172c3e;
+    --ink: #181a20;
     --muted: #4a6172;
-    --brand: #123d4e;
-    --accent: #0e674f;
-    --paper: #eff5f6;
+    --brand: #143f87;
+    --accent: #8b2038;
+    --paper: #f2f5fc;
     --line: #dbe3ea;
     --white: #fff;
 }
@@ -84,14 +84,14 @@ dialog h2, dialog h3 { margin-bottom: .5rem; }
 .nav-button, #menu-toggle, #open-gate { display: inline-flex; align-items: center; gap: .5rem; }
 #menu-toggle { display: none; }
 .header { box-shadow: 0 3px 18px #17394c0b; }
-.mark { background: #133c4b; border: 1px solid #3b6874; box-shadow: inset 0 0 0 3px #245465; }
+.mark { background: #102f66; border: 1px solid #eec66c; box-shadow: inset 0 0 0 3px #265193; color: #ffda79; }
 .dashboard-banner {
     position: relative;
     isolation: isolate;
     overflow: hidden;
     border-radius: 20px;
     padding: clamp(1.4rem, 4vw, 2.6rem);
-    background: linear-gradient(115deg, #102c3d, #15505c);
+    background: linear-gradient(115deg, #0a214f, #225aa3);
     color: #f5ffff;
     box-shadow: 0 15px 32px #17395121;
 }
@@ -104,7 +104,7 @@ dialog h2, dialog h3 { margin-bottom: .5rem; }
     mask-image: linear-gradient(to right, transparent, black);
     pointer-events: none;
 }
-.dashboard-banner .eyebrow { color: #a5f0d4; }
+.dashboard-banner .eyebrow { color: #ffda79; }
 .dashboard-banner p:not(.eyebrow) { color: #d4e7ec; max-width: 52ch; }
 .dashboard-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
 .dashboard-actions .pill { background: #e5faf2; color: #174d39; }
@@ -117,17 +117,49 @@ dialog h2, dialog h3 { margin-bottom: .5rem; }
 .pending-key { --key: #ffd16a; color: #754711; }
 .occupied-key { --key: #f5a8a1; color: #842f30; }
 .zone-card { box-shadow: 0 7px 20px #17394c0a; }
+.zone-card:target { outline: 3px solid #b57a0b; outline-offset: 3px; }
+.zone-title { display: flex; align-items: center; gap: .45rem; }
+.zone-code { display: inline-grid; place-items: center; min-width: 1.65rem; padding: .05rem .3rem; border-radius: 5px; background: #f8e8bb; color: #573a10; font-size: .82rem; font-weight: 800; }
+.campus-board { margin-bottom: 1rem; overflow: hidden; border: 1px solid #c8d4e8; border-radius: 18px; background: #fff; box-shadow: 0 9px 25px #143f8710; }
+.campus-key { display: flex; justify-content: space-between; gap: .5rem; padding: .65rem 1rem; background: #102f66; color: #fff; font-size: .82rem; font-weight: 700; }
+.campus-key span:last-child { color: #ffda79; }
+.campus-plan {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas: "academic offices reception" "lot-a lot-b lot-c" "road road road" "entry entry entry";
+    gap: .6rem;
+    padding: clamp(.65rem, 2vw, 1.2rem);
+    background: radial-gradient(circle at 1px 1px, #c2d1e5 1px, transparent 0) 0 0 / 15px 15px, #e9eef8;
+}
+.academic { grid-area: academic; }
+.offices { grid-area: offices; }
+.reception { grid-area: reception; }
+.lot-a { grid-area: lot-a; }
+.lot-b { grid-area: lot-b; }
+.lot-c { grid-area: lot-c; }
+.campus-building { display: grid; align-content: end; gap: .4rem; min-height: 74px; padding: .55rem .7rem; border: 1px solid #345a97; border-top: 6px solid #76a2e0; border-radius: 8px 8px 4px 4px; background: #193f7a; color: #fff; font-weight: 700; font-size: clamp(.75rem, 2vw, .95rem); }
+.campus-building::before { content: ''; height: .8rem; border-radius: 2px; background: repeating-linear-gradient(90deg, #87addf 0 13px, transparent 13px 20px); }
+.offices { background: #84263d; border-color: #a9485c; border-top-color: #d5888f; }
+.offices::before { background: repeating-linear-gradient(90deg, #f4b6b1 0 13px, transparent 13px 20px); }
+.lot-link { display: grid; height: 100%; align-content: start; justify-items: start; gap: .3rem; border: 1px dashed #9daec8; border-radius: 8px; padding: .45rem; background: #fff; color: var(--ink); text-decoration: none; font-size: clamp(.73rem, 2vw, .92rem); overflow-wrap: anywhere; }
+a.lot-link:hover { border-color: #94671b; background: #fff8e6; }
+.lot-count { color: #166144; font-weight: 750; }
+.lot-full, .lot-unavailable { color: #84263d; }
+.campus-road { grid-area: road; height: 20px; display: grid; align-items: center; border-radius: 5px; background: #22334f; }
+.campus-road::before { content: ''; border-bottom: 2px dashed #efce7a; margin-inline: .55rem; }
+.campus-entry { grid-area: entry; display: flex; align-items: center; justify-content: center; gap: .35rem; justify-self: center; padding: .2rem .65rem; border-radius: 5px; background: #f9e7b7; color: #573a10; font-size: .82rem; font-weight: 800; }
+.bay-note { margin-top: .65rem; font-size: .83rem; }
 .parking-tiles {
     display: grid;
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(34px, 1fr));
     gap: 4px;
     padding: .48rem;
     margin: .75rem 0 .55rem;
     border-radius: 10px;
-    background: #153544;
+    background: #142a51;
 }
-.parking-tile { display: grid; place-items: center; min-height: 25px; border-radius: 3px; border: 1px solid currentColor; }
-.parking-tile .icon { width: min(100%, 18px); height: 18px; }
+.parking-tile { display: grid; align-content: center; justify-items: center; min-height: 32px; padding: 2px; border-radius: 3px; border: 1px solid currentColor; font-size: .65rem; font-weight: 750; line-height: 1.1; overflow-wrap: anywhere; text-align: center; }
+.parking-tile .icon { width: 14px; height: 12px; }
 .tile-available { color: #80dfb3; background: #264c47; }
 .tile-occupied { color: #ffd5cf; background: #934a4b; }
 .tile-pending { color: #35230d; background: #ffcf69; animation: assign-space 1.1s ease-in-out 3; }

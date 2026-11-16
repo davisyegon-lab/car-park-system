@@ -73,10 +73,24 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
             </div>
         </div>
         <div id="dashboard-stats" class="stats"></div>
-        <div class="section-heading zone-heading"><div><h2>Parking zone map</h2><p class="muted">Zone totals from the gate. The tiles show a schematic of occupancy.</p></div>
+        <div class="section-heading zone-heading"><div><h2>Campus parking map</h2><p class="muted">Select a zone to see its numbered bays and availability.</p></div>
             <ul class="map-legend" aria-label="Parking status key"><li class="available-key">Available</li><li class="pending-key">Assigning</li><li class="occupied-key">Occupied</li></ul>
         </div>
+        <section class="campus-board" aria-label="Illustrated campus plan">
+            <div class="campus-key"><span>Campus plan</span><span>Illustrative layout</span></div>
+            <div class="campus-plan">
+                <div class="campus-building academic"><span>Central Building</span></div>
+                <div id="campus-zone-a" class="campus-lot lot-a"></div>
+                <div class="campus-building offices"><span>MSB Building</span></div>
+                <div id="campus-zone-b" class="campus-lot lot-b"></div>
+                <div class="campus-building reception"><span>Library</span></div>
+                <div id="campus-zone-c" class="campus-lot lot-c"></div>
+                <div class="campus-road" aria-hidden="true"></div>
+                <div class="campus-entry"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Main gate</div>
+            </div>
+        </section>
         <div id="dashboard-zones" class="zone-grid"></div>
+        <p class="bay-note muted">Bay labels are for the illustration. The gate records occupancy and assignments by zone.</p>
     </section>
     <section id="gate-screen" class="screen" aria-labelledby="gate-title" hidden>
         <div class="page-heading desk-heading"><span class="desk-symbol"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><div><p class="eyebrow">Security desk</p><h1 id="gate-title">Gate operations</h1><p>Check vehicles in on the left. Search active sessions to check out or transfer a vehicle.</p></div></div>
