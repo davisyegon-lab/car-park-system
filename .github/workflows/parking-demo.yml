@@ -21,6 +21,9 @@ concurrency:
 jobs:
   demo:
     if: github.event_name == 'push' || github.actor == github.repository_owner
+    permissions:
+      contents: read
+      deployments: write
     runs-on: ubuntu-latest
     timeout-minutes: 360
     services:
@@ -114,5 +117,28 @@ jobs:
           path: ${{ runner.temp }}/demo-url.txt
           if-no-files-found: error
           retention-days: 1
+      - name: Publish the demo address on GitHub
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          endpoint="repos/$GITHUB_REPOSITORY/deployments"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          url=$(cat "$RUNNER_TEMP/demo-url.txt")
+          deployment=$(jq -n --arg ref "$GITHUB_SHA" '{ref:$ref, environment:"parking-demo", auto_merge:false, required_contexts:[], transient_environment:true, production_environment:false}' |
+            gh api --method POST "$endpoint" --input - --jq .id)
+          printf '%s\n' "$deployment" > "$RUNNER_TEMP/parking-deployment-id.txt"
+          gh api "$endpoint/$deployment/statuses" -f state=success -f environment_url="$url" -f log_url="$run_url" -F auto_inactive=false >/dev/null
+          printf '::notice title=Live parking demo::%s\n' "$url"
       - name: Keep the demo online for up to five hours and 45 minutes
         run: sleep 20700
+      - name: Mark the temporary deployment inactive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ -s "$RUNNER_TEMP/parking-deployment-id.txt" ]]; then
+            deployment=$(cat "$RUNNER_TEMP/parking-deployment-id.txt")
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment/statuses" -f state=inactive >/dev/null
+          fi
