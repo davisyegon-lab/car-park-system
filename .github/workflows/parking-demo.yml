@@ -2,17 +2,25 @@ name: Temporary parking demo
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/parking-demo.yml'
+      - '*.php'
+      - '*.sql'
+      - 'app.js'
+      - 'style.css'
 
 permissions:
   contents: read
 
 concurrency:
-  group: temporary-parking-demo
+  group: temporary-parking-demo-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
   demo:
-    if: github.actor == github.repository_owner
+    if: github.event_name == 'push' || github.actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 360
     services:
@@ -29,13 +37,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: v0.3.0-demo
           persist-credentials: false
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
           extensions: pdo_mysql, curl
           coverage: none
+      - name: Validate the release against MariaDB
+        env:
+          PARKING_DB_PORT: ${{ job.services.mariadb.ports[3306] }}
+          PARKING_DB_PASSWORD: isolated-demo-container
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.php' | xargs -0 -r -n1 php -l
+          node --check app.js
+          php tests.php
       - name: Start the isolated PHP demo
         env:
           PARKING_DB_PORT: ${{ job.services.mariadb.ports[3306] }}
@@ -45,6 +61,11 @@ jobs:
           set -euo pipefail
           export MYSQL_PWD="$PARKING_DB_PASSWORD"
           mysql --protocol=tcp -h 127.0.0.1 -P "$PARKING_DB_PORT" -u root < database.sql
+          mysql --protocol=tcp -h 127.0.0.1 -P "$PARKING_DB_PORT" -u root strathmore_smart_parking < parking-bays.sql
+          mysql --protocol=tcp -h 127.0.0.1 -P "$PARKING_DB_PORT" -u root strathmore_smart_parking <<'SQL'
+          INSERT INTO parking_bays (zone_id, bay_number, status, booking_label) VALUES
+            (3, 2, 'booked', 'Directors meeting'), (3, 3, 'unavailable', NULL);
+          SQL
           unset MYSQL_PWD
           cat > "$RUNNER_TEMP/parking-router.php" <<'PHP'
           <?php
@@ -70,7 +91,13 @@ jobs:
           for attempt in {1..30}; do
             url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/parking-tunnel.log" | head -1 || true)
             if [[ -n "$url" ]] && curl -fsS --max-time 5 "$url/api.php?action=state" | jq -e '.user == null and (.csrf | length > 0)' >/dev/null; then
-              for path in /phpmyadmin/ /database.sql /.git/config; do
+              curl -fsS --max-time 5 "$url/" -o "$RUNNER_TEMP/parking-demo.html"
+              grep -q 'id="active-summary"' "$RUNNER_TEMP/parking-demo.html"
+              curl -fsS --max-time 5 "$url/api.php?action=availability" | jq -e '
+                .zones[] | select(.id == 3) | .available == 10
+                and any(.bays[]; .number == 2 and .status == "booked" and (has("label") | not))
+                and any(.bays[]; .number == 3 and .status == "unavailable")'
+              for path in /phpmyadmin/ /database.sql /parking-bays.sql /.git/config; do
                 test "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$url$path")" = 404
               done
               printf '%s\n' "$url" | tee "$RUNNER_TEMP/demo-url.txt"

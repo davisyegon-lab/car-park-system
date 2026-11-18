@@ -2,23 +2,26 @@
 
 A Software Engineering class prototype built with PHP, JavaScript and MariaDB. It shows parking availability by zone using arrivals and departures recorded at the gate. All accounts and parking records are fictional.
 
-Use the current demo link shared by the group or follow the XAMPP setup below.
+Open the latest [Temporary parking demo run](https://github.com/teddexter0/car-park-system/actions/workflows/parking-demo.yml) and use the URL in its summary while the run is active. The link is temporary and lasts up to five hours and 45 minutes after publication.
+
+The link opens the interactive parking map without an account. Click a vacant bay to simulate arrival and click it again to simulate departure. Each browser tab can simulate one occupied bay at a time. Admin and security sign in to update the shared map and gate records. The hosted demo opens with two fictional examples in Visitor Parking: C02 booked for a directors’ meeting and C03 closed for maintenance.
 
 ## What each role can do
 
 | Role | Tasks |
 | --- | --- |
-| Student and staff | View available spaces by zone. |
+| Student | View and simulate occupying one bay at a time. |
+| Staff | View available spaces by zone. |
 | Gate officer | Check vehicles in and out, record visitors, transfer vehicles between zones and correct missed checkouts. |
-| Administrator | Manage parking zones and view reports and the audit log. |
+| Administrator | Book or close individual bays, manage zones and view reports and the audit log. |
 
-Entry is first come, first served. The illustrated campus map uses the Central Building, MSB and Library as landmarks for Zones A, B and C. Green tiles show available capacity, yellow previews a zone assignment and red shows occupied capacity. The numbered bays are map labels. Gate records track occupancy by zone.
+General parking is first come, first served. Green means vacant, yellow previews a gate assignment, red means occupied, grey means unavailable and blue means booked. On the dashboard, a student can click a green tile to simulate a sensor detecting a car. Clicking the same tile again simulates departure. Administrators can select a bay and hold it for a named booking, such as a directors’ meeting, or close it. Booking and closure edits stay in effect until an administrator clears them. Gate records track occupancy by zone and share the same available capacity.
 
 ## Run with XAMPP
 
 1. Copy this folder to `C:\xampp\htdocs\car-park-system`.
 2. Start **Apache** and **MySQL** in XAMPP.
-3. In phpMyAdmin, import `database.sql` once to create and seed the demo database.
+3. In phpMyAdmin, import `database.sql` once to create and seed the demo database. Then select `strathmore_smart_parking` and import `parking-bays.sql`. For an existing database, import only `parking-bays.sql` into that database to preserve the records.
 4. Open [localhost/car-park-system](http://localhost/car-park-system/).
 
 | Role | Demo email |
@@ -36,7 +39,10 @@ All demo accounts use `ParkingDemo26!`.
 2. Choose **Visitor** and enter fictional visit details and a vehicle registration such as `DEMO701`.
 3. Select **Visitor Parking** and look for the yellow assignment preview. Check the vehicle in. A fresh database shows availability drop from 12 to 11.
 4. Find the vehicle under **Active sessions** and check it out. Availability returns to 12.
-5. Sign in as the administrator to view zones and the two events in the audit log.
+5. Search active sessions by registration or by an exact session number such as `#12`. For a transfer, select a different zone with space and record a reason. For a missed exit, enter the correction reason and follow the physical ID reminder if shown.
+6. Sign in as the administrator to view zones and the recorded events in the audit log.
+
+The hosted demo starts Visitor Parking at 10 available bays because two bays have example holds. The local walkthrough starts at 12.
 
 ## Entity relationship diagram
 
@@ -46,6 +52,8 @@ erDiagram
     USERS o|--o{ PARKING_SESSIONS : drives
     VISITORS o|--|| PARKING_SESSIONS : visits
     PARKING_ZONES ||--o{ PARKING_SESSIONS : contains
+    PARKING_ZONES ||--o{ PARKING_BAYS : contains
+    USERS o|--o| PARKING_BAYS : simulates_occupancy
     USERS o|--o{ AUDIT_LOGS : performs
 
     MOCK_AMS {
@@ -82,6 +90,13 @@ erDiagram
         string active_plate UK
         datetime checkin_at
         datetime checkout_at
+    }
+    PARKING_BAYS {
+        int zone_id PK, FK
+        int bay_number PK
+        enum status
+        int student_id FK, UK
+        string booking_label
     }
     AUDIT_LOGS {
         int id PK

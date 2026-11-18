@@ -23,9 +23,14 @@ let amsRequest = 0;
 let sessionsRequest = 0;
 let reportRequest = 0;
 let assignment = null;
+let dashboardZones = [];
+let simulatedBay = null;
+const bayPages = new Map();
+const baysPerPage = 56;
+const bayStatuses = { available: 'Vacant', pending: 'Selected', occupied: 'Occupied', booked: 'Booked', unavailable: 'Unavailable' };
 
 function notify(message, error = false, target = 'notice') {
-    const element = $(target);
+    const element = $(target) || $('notice');
     element.textContent = message;
     element.hidden = !message;
     element.classList.toggle('error', error);
@@ -39,11 +44,16 @@ async function api(action, data, params = {}) {
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
         body: JSON.stringify(data),
     };
-    const response = await fetch(`api.php?${query}`, options);
-    const result = await response.json();
+    const url = `api.php?${query}`;
+    const response = await fetch(url, options).catch(() => {
+        throw new Error(data === undefined ? 'Could not connect. Refresh and try again.' : 'The server did not confirm the change. Refresh and check the record before retrying.');
+    });
+    const result = await response.json().catch(() => {
+        throw new Error(data === undefined ? 'The server could not load parking data.' : 'The server did not confirm the change. Refresh and check the record before retrying.');
+    });
     if (requestGeneration !== generation) return null;
     if (!response.ok) {
-        if (currentUser && (response.status === 401 || (response.status === 403 && result.error.startsWith('Your session token')))) {
+        if (currentUser && (response.status === 401 || (response.status === 403 && result.error?.startsWith('Your session token')))) {
             const state = await api('state');
             if (state && !state.user) {
                 csrf = state.csrf;
@@ -54,7 +64,7 @@ async function api(action, data, params = {}) {
                 return null;
             }
         }
-        throw new Error(result.error || 'Request failed.');
+        throw Object.assign(new Error(result.error || 'Request failed.'), { status: response.status });
     }
     if (result.csrf) csrf = result.csrf;
     return result;
@@ -67,14 +77,17 @@ function updateUser(user) {
     $('menu-toggle').hidden = !user;
     $('logout').hidden = !user;
     const canUseGate = ['security', 'admin'].includes(user?.role);
+    $('student-bay-help').hidden = Boolean(user) && user.role !== 'student';
+    $('admin-bay-help').hidden = user?.role !== 'admin';
     document.querySelector('[data-screen="gate"]').hidden = !canUseGate;
     $('open-gate').hidden = !canUseGate;
     document.querySelector('[data-screen="admin"]').hidden = user?.role !== 'admin';
-    $('identity').textContent = user ? `${user.name} · ${roles[user.role]}` : '';
+    $('identity').textContent = user ? `${user.name} · ${roles[user.role]}` : 'Public parking map';
     if (!user) {
         $('checkin-form').reset();
         $('ams-search').value = '';
         $('plate-search').value = '';
+        $('active-summary').textContent = '';
         $('history-search').value = '';
         for (const id of ['ams-users', 'checkin-zone', 'dashboard-stats', 'dashboard-zones', 'active-list',
             'zone-list', 'report-stats', 'report-zones', 'history-list', 'audit-list', 'account-list', 'action-fields', 'assignment-map']) {
@@ -85,6 +98,8 @@ function updateUser(user) {
         adminZones = [];
         activeSessions = [];
         assignment = null;
+        dashboardZones = [];
+        bayPages.clear();
         dialogSubmit = null;
         toggleVisitorFields();
     }
@@ -92,6 +107,7 @@ function updateUser(user) {
 
 function show(page) {
     screen = page;
+    $('open-login').hidden = Boolean(currentUser) || page === 'login';
     setMenu(false);
     all('.screen').forEach((section) => { section.hidden = section.id !== `${page}-screen`; });
     all('[data-screen]').forEach((button) => {
@@ -112,10 +128,14 @@ function stats(id, values) {
 
 function zoneCards(id, zones) {
     const container = $(id);
-    const signature = JSON.stringify(zones);
+    const paginated = id === 'dashboard-zones';
+    const role = currentUser?.role || 'guest';
+    const interactive = paginated && ['guest', 'student', 'admin'].includes(role);
+    const signature = JSON.stringify([zones, [...bayPages], role]);
     if (container.dataset.snapshot === signature && container.childElementCount) return;
     const before = new Map([...container.querySelectorAll('.zone-card')].map((card) =>
         [card.dataset.zoneId, Number(card.dataset.occupied)]));
+    const focused = container.contains(document.activeElement) ? document.activeElement.id : '';
     container.dataset.snapshot = signature;
     container.innerHTML = zones.map((zone) => `
         <article class="panel zone-card" ${id === 'dashboard-zones' ? `id="zone-${Number(zone.id)}" tabindex="-1"` : ''} data-zone-id="${Number(zone.id)}" data-occupied="${Number(zone.occupied)}">
@@ -123,9 +143,11 @@ function zoneCards(id, zones) {
                 <span class="pill ${Number(zone.available) === 0 ? 'warning' : ''}">${zone.available} available</span>
             </div>
             <p class="muted">${escape(zone.description)}</p>
-            ${parkingTiles(zone, '', before.get(String(zone.id)))}
+            ${parkingTiles(zone, '', before.get(String(zone.id)), interactive, paginated)}
             <p>${zone.occupied} of ${zone.capacity} occupied</p>
+            ${interactive && role !== 'admin' ? `<p id="bay-notice-${Number(zone.id)}" class="notice" role="status" hidden></p>` : ''}
         </article>`).join('') || '<p>No active parking zones.</p>';
+    if (focused) $(focused)?.focus({ preventScroll: true });
 }
 
 function renderCampus(zones) {
@@ -143,29 +165,70 @@ function renderCampus(zones) {
     }
 }
 
-function parkingTiles(zone, phase, previousOccupied) {
+function parkingTiles(zone, phase, previousOccupied, interactive = false, paginated = false) {
+    const zoneId = Number(zone.id);
     const capacity = Number(zone.capacity);
+    const code = zoneCode(zoneId);
+    const explicit = new Map(zone.bays.map((bay) => [bay.number, bay]));
+    const pages = Math.ceil(capacity / baysPerPage);
+    let page = paginated ? Math.min(bayPages.get(zoneId) || 0, pages - 1) : 0;
+    if ((phase === 'pending' && Number(zone.available) > 0) || phase === 'confirmed') {
+        let assigned = Number(zone.gate_occupied) + (phase === 'pending' ? 1 : 0);
+        for (const number of explicit.keys()) {
+            if (number > assigned) break;
+            assigned++;
+        }
+        page = Math.max(0, Math.floor((assigned - 1) / baysPerPage));
+    }
+    const start = page * baysPerPage + 1;
+    const end = Math.min(capacity, start + baysPerPage - 1);
+    const tiles = [];
+    let gateRank = 0;
     const occupied = Number(zone.occupied);
-    const count = Math.min(56, capacity);
-    const occupiedTiles = (total) => total <= 0 ? 0 : total >= capacity ? count
-        : Math.max(1, Math.min(count - 1, Math.round(total / capacity * count)));
-    const taken = occupiedTiles(occupied);
-    const previous = previousOccupied === undefined ? taken : occupiedTiles(previousOccupied);
-    const marker = previousOccupied === undefined || previousOccupied === occupied ? -1
-        : Math.max(0, Math.min(count - 1, occupied > previousOccupied ? taken - 1 : taken));
-    const code = zoneCode(zone.id);
-    const tiles = Array.from({ length: count }, (_, i) => {
-        const pending = phase === 'pending' && i === taken;
-        const status = pending ? 'pending' : i < taken ? 'occupied' : 'available';
-        const changed = i === marker || (i >= Math.min(taken, previous) && i < Math.max(taken, previous));
-        const car = status !== 'available' ? '<svg class="icon"><use href="#i-car"/></svg>' : '';
-        const first = Math.floor(i * capacity / count) + 1;
-        const last = Math.floor((i + 1) * capacity / count);
-        const start = `${code}${String(first).padStart(2, '0')}`;
-        const label = first === last ? start : `${start}–${last}`;
-        return `<span class="parking-tile tile-${status}${changed ? ' tile-change' : ''}">${car}<span>${label}</span></span>`;
-    });
-    return `<div class="parking-tiles" aria-hidden="true">${tiles.join('')}</div>`;
+    const previousGate = previousOccupied === undefined ? Number(zone.gate_occupied)
+        : Math.max(0, Number(zone.gate_occupied) + previousOccupied - occupied);
+    for (let number = 1; number <= end; number++) {
+        const bay = explicit.get(number);
+        if (!bay) gateRank++;
+        if (number < start) continue;
+        const atGate = gateRank <= Number(zone.gate_occupied);
+        const pending = phase === 'pending' && gateRank === Number(zone.gate_occupied) + 1;
+        const status = bay?.status || (atGate ? 'occupied' : pending ? 'pending' : 'available');
+        const changed = !bay && atGate !== (gateRank <= previousGate);
+        const label = `${code}${String(number).padStart(2, '0')}`;
+        const description = `${label}, ${bay?.mine ? 'occupied by you' : bayStatuses[status]}${bay?.label ? `, ${bay.label}` : ''}`;
+        const canClick = interactive && (status === 'available' || (currentUser?.role === 'admin' ? status !== 'occupied' : bay?.mine));
+        const car = ['occupied', 'pending'].includes(status) ? '<svg class="icon" aria-hidden="true"><use href="#i-car"/></svg>' : '';
+        const content = `${car}<span>${label}</span>${bay?.mine ? '<span class="tile-owner">You</span>' : ''}`;
+        const attrs = `class="parking-tile tile-${status}${changed ? ' tile-change' : ''}" title="${escape(description)}"`;
+        tiles.push(canClick
+            ? `<button type="button" ${attrs} id="bay-${zoneId}-${number}" data-bay="${number}" data-zone-id="${zoneId}" data-status="${status}" aria-label="${escape(description)}">${content}</button>`
+            : `<span ${attrs} role="img" aria-label="${escape(description)}"><span class="tile-label" aria-hidden="true">${content}</span></span>`);
+    }
+    const pager = paginated && pages > 1 ? `<div class="bay-pages">
+        <button type="button" data-bay-page="${page - 1}" data-zone-id="${zoneId}" ${page === 0 ? 'disabled' : ''}>Previous bays</button>
+        <small>${start}–${end} of ${capacity}</small>
+        <button type="button" data-bay-page="${page + 1}" data-zone-id="${zoneId}" ${page === pages - 1 ? 'disabled' : ''}>Next bays</button>
+        </div>` : '';
+    return `<div class="parking-tiles">${tiles.join('')}</div>${pager}`;
+}
+
+function manageBay(zone, number, current) {
+    const label = `${zoneCode(zone.id)}${String(number).padStart(2, '0')}`;
+    const booking = zone.bays.find((bay) => bay.number === number)?.label || '';
+    const options = ['available', 'booked', 'unavailable'].map((status) =>
+        `<option value="${status}" ${status === (current === 'available' ? 'booked' : current) ? 'selected' : ''}>${bayStatuses[status]}</option>`);
+    openAction(`Manage bay ${label}`, `<label>Status <select name="status">${options.join('')}</select></label>
+        <label id="booking-field">Booking for <input name="booking_label" maxlength="100" placeholder="e.g. Directors’ meeting" value="${escape(booking)}"></label>`,
+    'Save bay', (form) => api('bay_manage', { zone_id: zone.id, bay_number: number, current, ...Object.fromEntries(new FormData(form)) }));
+    const form = $('action-form');
+    const showBooking = () => {
+        const booked = form.elements.status.value === 'booked';
+        $('booking-field').hidden = !booked;
+        form.elements.booking_label.required = booked;
+    };
+    form.elements.status.addEventListener('change', showBooking);
+    showBooking();
 }
 
 function renderAssignment() {
@@ -183,13 +246,11 @@ function renderAssignment() {
 
 async function loadDashboard(poll = false) {
     const request = ++dashboardRequest;
-    const result = await api('dashboard', undefined, poll ? { poll: '1' } : {});
+    const result = await api(currentUser ? 'dashboard' : 'availability', undefined, poll ? { poll: '1' } : {});
     if (!result || request !== dashboardRequest) return;
     if (screen === 'dashboard') {
-        stats('dashboard-stats', [['Total capacity', result.capacity], ['Occupied spaces', result.occupied],
-            ['Available spaces', result.available], ['Occupancy', `${result.percentage}%`]]);
-        zoneCards('dashboard-zones', result.zones);
-        renderCampus(result.zones);
+        dashboardZones = result.zones;
+        renderDashboardMap();
         $('updated').textContent = `Updated ${new Date().toLocaleTimeString([], { timeZone: 'Africa/Nairobi', hour: '2-digit', minute: '2-digit', second: '2-digit' })} EAT`;
     }
     if (screen === 'gate') {
@@ -197,6 +258,29 @@ async function loadDashboard(poll = false) {
         setOptions($('checkin-zone'), availableZones(), 'Select a zone');
         renderAssignment();
     }
+}
+
+function renderDashboardMap() {
+    const selected = !currentUser && simulatedBay;
+    const zones = dashboardZones.map((zone) => {
+        if (!selected || Number(zone.id) !== selected.zoneId) return zone;
+        const before = zone.bays.filter((bay) => bay.number < selected.number).length;
+        if (selected.number > Number(zone.capacity) || selected.number - before <= Number(zone.gate_occupied)
+            || zone.bays.some((bay) => bay.number === selected.number)) {
+            simulatedBay = null;
+            return zone;
+        }
+        const bays = [...zone.bays, { number: selected.number, status: 'occupied', mine: true }];
+        return { ...zone, bays, occupied: Number(zone.occupied) + 1, available: Number(zone.available) - 1 };
+    });
+    if (selected && !zones.some((zone) => Number(zone.id) === selected.zoneId)) simulatedBay = null;
+    const capacity = zones.reduce((sum, zone) => sum + Number(zone.capacity), 0);
+    const occupied = zones.reduce((sum, zone) => sum + Number(zone.occupied), 0);
+    const available = zones.reduce((sum, zone) => sum + Number(zone.available), 0);
+    stats('dashboard-stats', [['Total capacity', capacity], ['Occupied spaces', occupied], ['Available spaces', available],
+        ['Occupancy', `${capacity ? Math.round(occupied * 100 / capacity) : 0}%`]]);
+    zoneCards('dashboard-zones', zones);
+    renderCampus(zones);
 }
 
 function availableZones(exclude = 0) {
@@ -235,6 +319,9 @@ async function loadActive() {
     const result = await api('active', undefined, { q: $('plate-search').value });
     if (!result || request !== sessionsRequest) return;
     activeSessions = result.sessions;
+    const count = activeSessions.length;
+    $('active-summary').textContent = count === 100 ? 'Showing up to 100 active sessions. Search to narrow the results.'
+        : `${count} active ${count === 1 ? 'session' : 'sessions'} found.`;
     $('active-list').innerHTML = activeSessions.map((session) => record(
         `${escape(session.vehicle_plate)} <small>Session #${session.id}</small>`,
         `<small>${escape(session.driver)} · ${roles[session.driver_type]} · ${escape(session.zone)}</small>
@@ -329,22 +416,46 @@ function zoneDialog(operation, zone) {
 function gateDialog(operation, session) {
     const plate = escape(session.vehicle_plate);
     const heldId = Number(session.id_retained) ? '<p><strong>Return the physically retained ID.</strong></p>' : '';
-    const reason = '<label>Correction reason <input name="reason" required maxlength="250"></label>';
     const transfer = operation === 'transfer';
     const checkout = operation === 'checkout';
+    const reason = `<label>${transfer ? 'Transfer reason' : 'Correction reason'} <input name="reason" required maxlength="250"></label>`;
+    const destinations = availableZones(Number(session.zone_id));
+    if (transfer && !destinations.some((zone) => !zone.disabled)) {
+        notify('No other zone has space. Refresh availability before transferring.', true);
+        return;
+    }
     const fields = transfer
-        ? `<p>Current zone: ${escape(session.zone)}</p><label>New zone <select name="zone_id" required>${optionMarkup(availableZones(Number(session.zone_id)), 'Select a zone')}</select></label>${reason}`
+        ? `<p>Current zone: ${escape(session.zone)}</p><label>New zone <select name="zone_id" required>${optionMarkup(destinations, 'Select a zone')}</select></label>${reason}`
         : `<p>Confirm that ${plate} has departed.</p>${heldId}${checkout ? '' : reason}`;
     openAction(transfer ? `Transfer ${session.vehicle_plate}` : checkout ? 'Check out vehicle' : 'Correct missed checkout', fields,
         transfer ? 'Record transfer' : 'Record checkout',
-        (form) => api(operation, { ...Object.fromEntries(new FormData(form)), id: session.id }));
+        async (form) => {
+            try {
+                const result = await api(operation, {
+                    ...Object.fromEntries(new FormData(form)), id: session.id, expected_zone_id: session.zone_id,
+                });
+                if (!result) return null;
+                const message = transfer ? `${session.vehicle_plate} moved from ${result.from_zone} to ${result.to_zone}.`
+                    : `${checkout ? 'Checkout recorded' : 'Missed exit corrected'} for ${session.vehicle_plate}.`;
+                return { ...result, message };
+            } catch (error) {
+                if ([404, 409].includes(error.status)) {
+                    await Promise.allSettled([loadDashboard(), loadActive()]);
+                }
+                throw error;
+            }
+        });
 }
 
 function run(event, work, errorTarget = 'notice') {
-    const button = event.submitter || event.currentTarget;
+    const form = event.type === 'submit' ? event.currentTarget : null;
+    if (form?.dataset.saving === 'true') return;
+    if (form) form.dataset.saving = 'true';
+    const button = event.submitter || form?.querySelector('[type="submit"]') || event.currentTarget;
     if (button instanceof HTMLButtonElement) button.disabled = true;
     void Promise.resolve().then(work).catch((error) => notify(error.message, true, errorTarget)).finally(() => {
         if (button instanceof HTMLButtonElement) button.disabled = false;
+        if (form) delete form.dataset.saving;
     });
 }
 
@@ -357,9 +468,9 @@ function onSearch(id, work) {
 }
 
 const tour = [
-    ['Sign in as a student', 'Use student@parking.test and the demo password ParkingDemo26!. This fictional account is linked to the simulated AMS.'],
-    ['Check available spaces', 'Open Dashboard. Find Visitor Parking and note how many spaces are available.'],
-    ['Manage a parking zone', 'Sign out and sign in as admin@parking.test with the same password. Add a temporary zone, edit its capacity, then delete it while it has no history.'],
+    ['Try the sensor demo', 'Click a green bay on the public map to simulate arrival. Click the red bay again to simulate leaving.'],
+    ['Check available spaces', 'Find Visitor Parking. Blue bays are booked and grey bays are unavailable.'],
+    ['Manage a parking zone', 'Sign in as admin@parking.test with the demo password ParkingDemo26!. Add a temporary zone, edit its capacity, then delete it while it has no history.'],
     ['Switch to the security desk', 'Sign out and sign in as security@parking.test with the same password. Open Gate operations.'],
     ['Enter a fictional visitor', 'Choose Visitor. Use Quinn Demo, Interview, Careers Office and vehicle DEMO701. Select Visitor Parking. Mark the physical ID inspected and retained for the demo.'],
     ['Record the vehicle entry', 'Click Check in. The vehicle should appear in Active sessions with its assigned zone.'],
@@ -393,8 +504,9 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', (event) => run(event, async () => {
     if (!await api('logout', {})) return;
     updateUser(null);
-    show('login');
+    show('dashboard');
     notify('Signed out.');
+    await loadDashboard();
 }));
 $('menu-toggle').addEventListener('click', () => setMenu($('navigation').dataset.open !== 'true'));
 document.addEventListener('keydown', (event) => {
@@ -427,7 +539,6 @@ $('checkin-zone').addEventListener('change', () => {
 });
 $('checkin-form').addEventListener('submit', (event) => {
     event.preventDefault();
-    if (assignment?.phase === 'saving') return;
     run(event, async () => {
         const data = Object.fromEntries(new FormData(event.target));
         if (data.kind === 'visitor') {
@@ -437,19 +548,25 @@ $('checkin-form').addEventListener('submit', (event) => {
         const previous = Number(gateZones.find((zone) => String(zone.id) === data.zone_id)?.occupied);
         assignment = { id: data.zone_id, phase: 'saving', previous };
         renderAssignment();
+        let result;
         try {
-            if (!await api('checkin', data)) return;
+            result = await api('checkin', data);
         } catch (error) {
             assignment = null;
             renderAssignment();
+            if ([404, 409].includes(error.status)) {
+                $('plate-search').value = data.vehicle_plate;
+                await Promise.allSettled([loadDashboard(), loadActive()]);
+            }
             throw error;
         }
+        if (!result) return;
         assignment.phase = 'confirmed';
         event.target.reset();
         toggleVisitorFields();
         $('ams-search').value = '';
         $('plate-search').value = '';
-        notify('Vehicle checked in. Zone availability updated.');
+        notify(`Vehicle checked in to ${result.zone}. Session #${result.id}.`);
         try {
             await Promise.all([loadDashboard(), loadAms(), loadActive()]);
         } catch (error) {
@@ -478,6 +595,47 @@ $('active-list').addEventListener('click', (event) => {
     const button = event.target.closest('[data-operation]');
     if (button) gateDialog(button.dataset.operation, activeSessions.find((session) => session.id == button.dataset.id));
 });
+$('dashboard-zones').addEventListener('click', (event) => {
+    const control = event.target.closest('[data-bay-page]');
+    if (control) {
+        const zoneId = Number(control.dataset.zoneId);
+        bayPages.set(zoneId, Number(control.dataset.bayPage));
+        renderDashboardMap();
+        $(`zone-${zoneId}`).focus({ preventScroll: true });
+        return;
+    }
+    const button = event.target.closest('[data-bay]');
+    if (!button) return;
+    const zone = dashboardZones.find((item) => Number(item.id) === Number(button.dataset.zoneId));
+    const number = Number(button.dataset.bay);
+    const current = button.dataset.status;
+    if (!currentUser) {
+        const target = `bay-notice-${Number(zone.id)}`;
+        if (simulatedBay && current !== 'occupied') {
+            notify('Click your red bay again to leave before choosing another.', true, target);
+            return;
+        }
+        const leaving = current === 'occupied';
+        simulatedBay = leaving ? null : { zoneId: Number(zone.id), number };
+        renderDashboardMap();
+        $(`bay-${Number(zone.id)}-${number}`)?.focus({ preventScroll: true });
+        notify(leaving ? 'Departure simulated. The bay is vacant.' : 'Arrival simulated. Click your red bay again to leave.', false, target);
+    } else if (currentUser.role === 'admin') {
+        manageBay(zone, number, current);
+    } else if (currentUser.role === 'student') {
+        const target = `bay-notice-${Number(zone.id)}`;
+        run({ currentTarget: button }, async () => {
+            notify('', false, target);
+            const releasing = current === 'occupied';
+            const result = await api(releasing ? 'bay_release' : 'bay_occupy', { zone_id: zone.id, bay_number: number, current });
+            if (!result) return;
+            await loadDashboard();
+            if ($(target)) {
+                notify(releasing ? 'Departure simulated. The bay is vacant.' : 'Arrival simulated. Click your bay again to leave.', false, target);
+            }
+        }, target);
+    }
+});
 $('action-form').addEventListener('submit', (event) => {
     event.preventDefault();
     run(event, async () => {
@@ -485,16 +643,24 @@ $('action-form').addEventListener('submit', (event) => {
         const result = await dialogSubmit(event.target);
         if (!result) return;
         $('action-dialog').close();
-        notify(result.return_id ? 'Checkout recorded. Return the visitor’s physically retained ID.' : 'Parking record updated.');
+        const message = result.message || 'Parking record updated.';
+        notify(result.return_id ? `${message} Return the visitor’s physically retained ID.` : message);
         try {
             if (screen === 'gate') await Promise.all([loadDashboard(), loadActive()]);
             if (screen === 'admin') await loadAdmin();
+            if (screen === 'dashboard') await loadDashboard();
         } catch (error) {
             notify(`The change was saved. Refresh failed: ${error.message}`, true);
         }
     }, 'action-error');
 });
-all('[data-close]').forEach((button) => button.addEventListener('click', () => $(button.dataset.close).close()));
+$('action-dialog').addEventListener('cancel', (event) => {
+    if ($('action-form').dataset.saving === 'true') event.preventDefault();
+});
+all('[data-close]').forEach((button) => button.addEventListener('click', () => {
+    if (button.dataset.close === 'action-dialog' && $('action-form').dataset.saving === 'true') return;
+    $(button.dataset.close).close();
+}));
 $('tour-button').addEventListener('click', () => {
     renderTour();
     $('tour-dialog').showModal();
@@ -511,7 +677,7 @@ $('tour-next').addEventListener('click', () => {
 });
 
 setInterval(() => {
-    if (!currentUser || screen !== 'dashboard' || document.hidden) return;
+    if (screen !== 'dashboard' || document.hidden) return;
     loadDashboard(true).catch((error) => { $('updated').textContent = error.message; });
 }, 10000);
 
@@ -520,10 +686,10 @@ async function initialize() {
     if (!state) return;
     $('demo-credentials').hidden = !state.demo && $('demo-credentials').dataset.public !== 'true';
     updateUser(state.user);
-    show(state.user ? 'dashboard' : 'login');
-    if (state.user) await loadDashboard();
+    show('dashboard');
+    await loadDashboard();
 }
 initialize().catch((error) => {
-    show('login');
+    show('dashboard');
     notify(error.message, true);
 });

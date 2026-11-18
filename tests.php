@@ -41,7 +41,7 @@ function startServer(string $schema): string
     $address = stream_socket_get_name($socket, false);
     fclose($socket);
     $environment = array_merge(getenv(), [
-        'PARKING_DB_NAME' => $schema, 'PARKING_TEST_MODE' => '1', 'PARKING_TEST_TIMEOUT' => '4',
+        'PARKING_DB_NAME' => $schema, 'PARKING_TEST_MODE' => '1', 'PARKING_TEST_TIMEOUT' => '4', 'PARKING_PUBLIC_DEMO' => '0',
     ]);
     $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     $process = proc_open([PHP_BINARY, '-S', $address], [
@@ -129,14 +129,15 @@ function zone(array $result, int $id): array
     throw new RuntimeException("Zone $id was not found");
 }
 
-function race(Client $a, Client $b, int $zone, PDO $pdo): array
+function race(array $requests, array $zones, PDO $pdo): array
 {
     $multi = curl_multi_init();
-    $requests = [$a->handle('checkin', driver(1, 'RACEA1', $zone)), $b->handle('checkin', driver(2, 'RACEB2', $zone))];
     $pdo->beginTransaction();
     $lock = $pdo->prepare('SELECT id FROM parking_zones WHERE id = ? FOR UPDATE');
-    $lock->execute([$zone]);
-    $lock->closeCursor();
+    foreach ($zones as $zone) {
+        $lock->execute([$zone]);
+        $lock->closeCursor();
+    }
     try {
         foreach ($requests as $request) {
             curl_multi_add_handle($multi, $request);
@@ -178,6 +179,7 @@ try {
     $created = true;
     $ddl = file_get_contents(__DIR__ . '/database.sql');
     $ddl = preg_replace('/\ACREATE DATABASE[^;]+;\s*USE[^;]+;\s*/i', '', $ddl);
+    $ddl .= file_get_contents(__DIR__ . '/parking-bays.sql');
     $pdo->exec("USE `$schema`");
     foreach (explode(';', $ddl) as $statement) {
         if (trim($statement) !== '') {
@@ -194,12 +196,15 @@ try {
 
     scenario('A01', 'Authentication and simulated AMS', function () use ($student, $url) {
         $student->request('dashboard', 401);
+        check(count($student->request('availability')['zones']) === 3, 'The public map did not show all active zones');
         $student->request('state');
+        $student->request('bay_occupy', 401, ['zone_id' => 3, 'bay_number' => 1, 'current' => 'available']);
+        $student->request('bay_manage', 401, ['zone_id' => 3, 'bay_number' => 1, 'current' => 'available', 'status' => 'unavailable']);
         $student->request('login', 401, ['email' => 'student@parking.test', 'password' => 'wrong']);
         check($student->login('student')['user']['role'] === 'student', 'Unexpected student role');
         check((new Client($url))->login('staff')['user']['role'] === 'staff', 'Unexpected staff role');
         $student->request('dashboard');
-        return 'Anonymous and invalid credentials got 401; student and staff signed in; dashboard returned 200.';
+        return 'Guests could read availability, anonymous writes returned 401, and student and staff could sign in.';
     });
     scenario('A02', 'Role boundaries, CSRF and logout', function () use ($student, $security) {
         $student->request('zones', 403);
@@ -223,17 +228,66 @@ try {
         check(!in_array($id, array_column($admin->request('zones')['zones'], 'id')), 'Deleted zone still exists');
         return 'Temporary zone read at capacity 3, edited to 5 and removed from persisted results.';
     });
+    scenario('B01', 'Guest bookings, unavailable bays and shared availability', function () use ($admin, $security, $student) {
+        $student->login('student');
+        $id = (int) $admin->request('zone_create', 200, ['name' => 'Bays Demo', 'capacity' => 2])['id'];
+        $firstBay = ['zone_id' => $id, 'bay_number' => 1];
+        $secondBay = ['zone_id' => $id, 'bay_number' => 2];
+        $booking = ['current' => 'available', 'status' => 'booked', 'booking_label' => 'Directors meeting'];
+        $student->request('bay_manage', 403, $firstBay + $booking);
+        $admin->request('bay_manage', 200, $firstBay + $booking);
+        $admin->request('bay_manage', 200, $secondBay + ['current' => 'available', 'status' => 'unavailable']);
+        $studentZone = zone($student->request('dashboard'), $id);
+        check($studentZone['available'] === 0 && $studentZone['occupied'] === 0, 'Held bays were counted incorrectly');
+        check(array_column($studentZone['bays'], 'status') === ['booked', 'unavailable'], 'Bay states were missing');
+        check(!isset($studentZone['bays'][0]['label']), 'Booking details were exposed to a student');
+        $publicZone = zone($student->request('availability'), $id);
+        check($publicZone['available'] === 0 && $publicZone['bays'][0]['status'] === 'booked'
+            && !isset($publicZone['bays'][0]['label']), 'The public map did not show a private booking correctly');
+        check(zone($admin->request('dashboard'), $id)['bays'][0]['label'] === 'Directors meeting', 'Booking label missing');
+        $student->request('bay_occupy', 409, $firstBay + ['current' => 'available']);
+        $security->request('checkin', 409, driver(2, 'BAYS001', $id));
+        $admin->request('bay_manage', 200, $secondBay + ['current' => 'unavailable', 'status' => 'available']);
+        $entry = $security->request('checkin', 200, driver(2, 'BAYS001', $id));
+        $admin->request('bay_manage', 409, $secondBay + $booking);
+        $security->request('checkout', 200, ['id' => $entry['id']]);
+        $admin->request('bay_manage', 200, $firstBay + ['current' => 'booked', 'status' => 'available']);
+        check(zone($student->request('dashboard'), $id)['available'] === 2, 'Cleared bays did not reopen');
+        return 'Booking and closure persisted, reduced availability and blocked both student and gate claims.';
+    });
+    scenario('B02', 'A student can occupy one bay across zones and sessions', function () use ($admin, $student, $url2, $pdo) {
+        $other = new Client($url2);
+        $other->login('student');
+        $a = ['zone_id' => 1, 'bay_number' => 50];
+        $b = ['zone_id' => 3, 'bay_number' => 12];
+        $claim = ['current' => 'available'];
+        $statuses = race([$student->handle('bay_occupy', $a + $claim), $other->handle('bay_occupy', $b + $claim)], [1, 3], $pdo);
+        check($statuses === [200, 409], 'Concurrent claims should have exactly one winner');
+        $dashboard = $student->request('dashboard');
+        $mineInA = zone($dashboard, 1)['bays'][0]['mine'] ?? false;
+        [$own, $next] = $mineInA ? [$a, $b] : [$b, $a];
+        check(zone($dashboard, $own['zone_id'])['bays'][0]['mine'], 'The student could not see their bay');
+        $admin->request('bay_release', 403, $own + ['current' => 'occupied']);
+        $student->request('bay_occupy', 409, $next + $claim);
+        $student->request('bay_release', 200, $own + ['current' => 'occupied']);
+        $student->request('bay_occupy', 200, $next + $claim);
+        $student->request('bay_release', 200, $next + ['current' => 'occupied']);
+        return 'Two sessions competing across zones got 200 and 409. Releasing the winning bay allowed another claim.';
+    });
     scenario('P01', 'Student and staff entry and live counts', function () use ($admin, $security, &$zoneId, &$first) {
         $zoneId = $admin->request('zone_create', 200, ['name' => 'Lifecycle Demo', 'capacity' => 2])['id'];
         check(count($security->request('ams', 200, null, ['q' => 'STU-DEMO'])['users']) === 1, 'AMS search mismatch');
-        $first = $security->request('checkin', 200, driver(1, 'DEMO 901', $zoneId))['id'];
+        $arrival = $security->request('checkin', 200, driver(1, 'DEMO 901', $zoneId));
+        $first = $arrival['id'];
+        check($arrival['zone'] === 'Lifecycle Demo', 'Missing check-in confirmation zone');
         check((int) zone($security->request('dashboard'), $zoneId)['available'] === 1, 'Expected one free space');
         $security->request('checkin', 200, driver(2, 'DEMO902', $zoneId));
         check((int) zone($security->request('dashboard'), $zoneId)['available'] === 0, 'Expected no free spaces');
         return 'AMS located the student. Check-ins moved availability from 2 to 1 to 0.';
     });
     scenario('P02', 'Duplicate, capacity and historical integrity', function () use ($admin, $security, &$zoneId, &$first) {
-        $security->request('checkin', 409, driver(1, 'demo901', 1));
+        $duplicate = $security->request('checkin', 409, driver(1, 'demo901', $zoneId));
+        check(str_contains($duplicate['error'], 'already has an active'), 'A full zone hid the duplicate vehicle error');
         $security->request('checkin', 409, driver(1, 'DEMO903', $zoneId));
         $admin->request('zone_delete', 409, ['id' => $zoneId]);
         $admin->request('zone_update', 409, ['id' => $zoneId, 'name' => 'Lifecycle Demo', 'capacity' => 1]);
@@ -252,27 +306,48 @@ try {
         check((int) $admin->request('report')['active_visitors'] === 1, 'Visitor check-in absent from report');
         $matches = $security->request('active', 200, null, ['q' => 'DEMO 904'])['sessions'];
         check(count($matches) === 1 && (int) $matches[0]['id'] === $visitorSession, 'Plate lookup failed');
-        $security->request('transfer', 200, ['id' => $visitorSession, 'zone_id' => $zoneId, 'reason' => 'Officer verified the zone']);
+        $exact = $security->request('active', 200, null, ['q' => "#$visitorSession"])['sessions'];
+        check(array_column($exact, 'id') === array_column($matches, 'id'), 'Exact session lookup failed');
+        $transfer = ['id' => $visitorSession, 'zone_id' => $zoneId, 'expected_zone_id' => 3, 'reason' => 'Officer verified the zone'];
+        $moved = $security->request('transfer', 200, $transfer);
+        check($moved['from_zone'] === 'Visitor Parking' && $moved['to_zone'] === 'Lifecycle Demo', 'Transfer confirmation omitted its zones');
+        $security->request('transfer', 409, $transfer);
+        $security->request('correct_checkout', 409, ['id' => $visitorSession, 'expected_zone_id' => 3, 'reason' => 'Stale view']);
         $dashboard = $security->request('dashboard');
         check((int) zone($dashboard, 3)['occupied'] === 0 && (int) zone($dashboard, $zoneId)['available'] === 0, 'Transfer occupancy incorrect');
         $security->request('correct_checkout', 422, ['id' => $visitorSession]);
-        $closed = $security->request('correct_checkout', 200, ['id' => $visitorSession, 'reason' => 'Officer confirmed departure']);
+        $correction = ['id' => $visitorSession, 'expected_zone_id' => $zoneId, 'reason' => 'Officer confirmed departure'];
+        $closed = $security->request('correct_checkout', 200, $correction);
         check($closed['return_id'] && (int) $admin->request('report')['active_visitors'] === 0, 'Missing ID reminder or visitor not closed');
+        $security->request('correct_checkout', 409, $correction);
+        check($security->request('active', 200, null, ['q' => "#$visitorSession"])['sessions'] === [], 'Closed session appeared in active lookup');
         $pending = $security->request('active', 200, null, ['q' => 'DEMO902'])['sessions'][0];
         $security->request('checkout', 200, ['id' => $pending['id']]);
         $admin->request('zone_delete', 409, ['id' => $zoneId]);
         $admin->request('zone_update', 200, ['id' => $zoneId, 'name' => 'Lifecycle Demo', 'capacity' => 2, 'active' => false]);
         check(!in_array($zoneId, array_column($security->request('dashboard')['zones'], 'id')), 'Deactivated zone visible');
-        return 'Validated ID flags; moved occupancy; corrected exit returned ID reminder; used zone deactivated with history intact.';
+        return 'Plate and #session matched; stale and repeated writes rejected; transfer named both zones; corrected exit returned the ID reminder.';
     });
     scenario('P04', 'Simultaneous last-space race', function () use ($admin, $security, $url2, $pdo, &$raceZone) {
         $raceZone = $admin->request('zone_create', 200, ['name' => 'Race Demo', 'capacity' => 1])['id'];
         $other = new Client($url2);
         $other->login('security');
-        $statuses = race($security, $other, $raceZone, $pdo);
+        $statuses = race([$security->handle('checkin', driver(1, 'RACEA1', $raceZone)),
+            $other->handle('checkin', driver(2, 'RACEB2', $raceZone))], [$raceZone], $pdo);
         check($statuses === [200, 409], 'Unexpected concurrent statuses: ' . implode(', ', $statuses));
         check((int) zone($admin->request('zones'), $raceZone)['occupied'] === 1, 'Race oversubscribed the zone');
         return 'Two HTTP requests blocked on the same zone row; after release one got 200 and one 409; exactly one occupied.';
+    });
+    scenario('P05', 'Duplicate arrival across two gates', function () use ($security, $url2, $pdo) {
+        $other = new Client($url2);
+        $other->login('security');
+        $statuses = race([$security->handle('checkin', driver(1, 'RACE DUP', 1)),
+            $other->handle('checkin', driver(2, 'racedup', 2))], [1, 2], $pdo);
+        check($statuses === [200, 409], 'Unexpected duplicate arrival statuses: ' . implode(', ', $statuses));
+        $sessions = $security->request('active', 200, null, ['q' => 'RACE DUP'])['sessions'];
+        check(count($sessions) === 1, 'Expected exactly one active session across the two zones');
+        $security->request('checkout', 200, ['id' => $sessions[0]['id']]);
+        return 'The same normalized registration sent to two zones produced one active record and one conflict.';
     });
     scenario('R01', 'Audit, reporting and privacy', function () use ($admin, $security, $pdo, &$visitorSession) {
         $audit = $admin->request('audit')['logs'];
