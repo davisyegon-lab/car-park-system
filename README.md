@@ -2,7 +2,7 @@
 
 A Software Engineering class prototype built with PHP, JavaScript and MariaDB. It shows parking availability by zone using arrivals and departures recorded at the gate. All accounts and parking records are fictional.
 
-Open the latest active [parking demo deployment](https://github.com/teddexter0/car-park-system/deployments). The link is temporary and lasts up to five hours and 45 minutes after publication. The [demo workflow runs](https://github.com/teddexter0/car-park-system/actions/workflows/parking-demo.yml) include the release checks and a copy of the URL.
+Open the [latest parking demo deployment record](https://api.github.com/repos/teddexter0/car-park-system/deployments?environment=parking-demo&per_page=1) and follow its `statuses_url`. If the latest status is `success`, open `environment_url` for the public demo. The demo stays online for up to five hours and 45 minutes. The [demo workflow runs](https://github.com/teddexter0/car-park-system/actions/workflows/parking-demo.yml) show the release checks.
 
 The link opens the interactive parking map without an account. Click a vacant bay to simulate arrival and click it again to simulate departure. Each browser tab can simulate one occupied bay at a time. Admin and security sign in to update the shared map and gate records. The hosted demo opens with two fictional examples in Visitor Parking: C02 booked for a directors’ meeting and C03 closed for maintenance.
 
