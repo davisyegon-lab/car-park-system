@@ -1,4 +1,5 @@
 <?php
+$publicDemo = getenv('PARKING_PUBLIC_DEMO') === '1';
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
 header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-ancestors \'none\'; form-action \'self\'');
@@ -26,13 +27,13 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
         <div class="brand"><span class="mark" aria-hidden="true">P</span><div><strong>Strathmore Smart Parking</strong><small>Parking &amp; access management</small></div></div>
         <button id="menu-toggle" type="button" aria-expanded="false" aria-controls="navigation" hidden><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg> Menu</button>
         <nav id="navigation" aria-label="Main navigation" data-open="false" hidden>
-            <button class="nav-button" data-screen="dashboard"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Dashboard</button>
-            <button class="nav-button" data-screen="gate" hidden><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Gate operations</button>
-            <button class="nav-button" data-screen="admin" hidden><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg> Administration</button>
+            <button class="nav-button" type="button" data-screen="dashboard" aria-controls="dashboard-screen"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Dashboard</button>
+            <button class="nav-button" type="button" data-screen="gate" aria-controls="gate-screen" hidden><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Gate operations</button>
+            <button class="nav-button" type="button" data-screen="admin" aria-controls="admin-screen" hidden><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg> Administration</button>
         </nav>
         <div class="header-actions">
             <button id="tour-button" class="quiet" type="button">Demo tour</button>
-            <button id="open-login" type="button" data-open-screen="login" hidden>Admin / security sign-in</button>
+            <button id="open-login" type="button" data-open-screen="login" hidden><?= $publicDemo ? 'Admin / security sign-in' : 'Sign in' ?></button>
             <button id="logout" class="quiet" type="button" hidden>Sign out</button>
         </div>
     </div>
@@ -42,7 +43,7 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
     <section id="login-screen" class="screen login-layout" aria-labelledby="login-title" hidden>
         <div class="login-intro">
             <p class="eyebrow">Unofficial academic prototype</p>
-            <h1 id="login-title">Campus parking</h1>
+            <h1 id="login-title" tabindex="-1">Campus parking</h1>
             <p>See which zones have room. At the gate, record arrivals, assign a zone and check vehicles out.</p>
             <div class="entry-illustration" aria-hidden="true">
                 <div class="entry-bays"><span></span><span></span><span><svg class="icon"><use href="#i-car"/></svg></span><span></span></div>
@@ -51,12 +52,13 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
         </div>
         <form id="login-form" class="panel login-form">
             <h2>Sign in</h2>
-            <p class="muted">Sign in to manage bays or use the gate desk.</p>
+            <p class="muted">Sign in to access your role’s parking tools.</p>
+            <p id="login-error" class="notice error" role="alert"></p>
             <label>Email <input required type="email" name="email" autocomplete="username" maxlength="150" placeholder="admin@parking.test"></label>
             <label>Password <input required type="password" name="password" autocomplete="current-password" maxlength="72"></label>
             <button type="submit" class="primary">Sign in</button>
             <button id="back-to-map" type="button" class="quiet" data-open-screen="dashboard">Back to parking map</button>
-            <details id="demo-credentials" data-public="<?= getenv('PARKING_PUBLIC_DEMO') === '1' ? 'true' : 'false' ?>" hidden><summary>Demo credentials</summary>
+            <details id="demo-credentials" data-public="<?= $publicDemo ? 'true' : 'false' ?>" hidden><summary>Demo credentials</summary>
                 <p>Password for each role <strong>ParkingDemo26!</strong></p>
                 <div class="demo-picks">
                     <button type="button" data-demo="security">Security</button><button type="button" data-demo="admin">Admin</button>
@@ -66,15 +68,17 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
     </section>
     <section id="dashboard-screen" class="screen" aria-labelledby="dashboard-title" hidden>
         <div class="page-heading dashboard-banner">
-            <div><p class="eyebrow" id="identity"></p><h1 id="dashboard-title">Parking availability</h1>
+            <div><p class="eyebrow" id="identity"></p><h1 id="dashboard-title" tabindex="-1">Parking availability</h1>
                 <p>General parking is first come, first served. Check the map for vacant, booked and unavailable bays.</p></div>
             <div class="dashboard-actions">
                 <button type="button" id="open-gate" data-open-screen="gate" hidden><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Open gate desk</button>
-                <small id="updated" class="pill"></small>
+                <button type="button" id="refresh-dashboard">Refresh availability</button>
+                <small id="updated" class="pill" hidden></small>
             </div>
         </div>
+        <p id="dashboard-status" class="notice" role="status"></p>
         <div id="dashboard-stats" class="stats"></div>
-        <div class="section-heading zone-heading"><div><h2>Campus parking map</h2><p class="muted">Select a zone to see its numbered bays and availability.</p></div>
+        <div class="section-heading zone-heading"><div><h2 id="campus-map-title" tabindex="-1">Campus parking map</h2><p class="muted">Select a zone to see its numbered bays and availability.</p></div>
             <ul class="map-legend" aria-label="Parking status key"><li class="available-key">Vacant</li><li class="pending-key">Selected</li><li class="occupied-key">Occupied</li><li class="unavailable-key">Unavailable</li><li class="booked-key">Booked</li></ul>
         </div>
         <section class="campus-board" aria-label="Illustrated campus plan">
@@ -90,13 +94,13 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
                 <div class="campus-entry"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> Main gate</div>
             </div>
         </section>
-        <p id="student-bay-help" class="bay-note muted" hidden><strong>Try the sensor demo.</strong> Click a green bay to turn it red. Click the same bay again to leave. Visitors can simulate one bay at a time in their own browser.</p>
+        <p id="student-bay-help" class="bay-note muted" hidden><strong>Try the sensor demo.</strong> Select a vacant bay to simulate arrival. Select the same bay again to leave. <span id="simulation-scope">Public map changes apply to this tab only.</span></p>
         <p id="admin-bay-help" class="bay-note muted" hidden>Select a bay to book it for guests, mark it unavailable or return it to general parking.</p>
         <div id="dashboard-zones" class="zone-grid"></div>
         <p class="bay-note muted">Gate check-ins record the zone. The map places those vehicles in the first bays without a simulated arrival, booking or closure.</p>
     </section>
     <section id="gate-screen" class="screen" aria-labelledby="gate-title" hidden>
-        <div class="page-heading desk-heading"><span class="desk-symbol"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><div><p class="eyebrow">Security desk</p><h1 id="gate-title">Gate operations</h1><p>Check vehicles in on the left. Search active sessions to check out or transfer a vehicle.</p></div></div>
+        <div class="page-heading desk-heading"><span class="desk-symbol"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><div><p class="eyebrow">Security desk</p><h1 id="gate-title" tabindex="-1">Gate operations</h1><p>Check vehicles in, or search active sessions to check out or transfer a vehicle.</p></div></div>
         <div class="gate-grid">
             <form id="checkin-form" class="panel">
                 <h2>Check in a vehicle</h2>
@@ -130,12 +134,12 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
         </div>
     </section>
     <section id="admin-screen" class="screen" aria-labelledby="admin-title" hidden>
-        <div class="page-heading"><div><p class="eyebrow">Administrator</p><h1 id="admin-title">Administration</h1><p>Manage zones and review parking activity.</p></div></div>
+        <div class="page-heading"><div><p class="eyebrow">Administrator</p><h1 id="admin-title" tabindex="-1">Administration</h1><p>Manage zones and review parking activity.</p></div></div>
         <nav class="tabs" aria-label="Administration sections">
-            <button data-admin="zones" aria-pressed="true">Zones</button>
-            <button data-admin="report" aria-pressed="false">Reports</button>
-            <button data-admin="audit" aria-pressed="false">Audit log</button>
-            <button data-admin="accounts" aria-pressed="false">Accounts</button>
+            <button type="button" data-admin="zones" aria-controls="admin-zones" aria-pressed="true">Zones</button>
+            <button type="button" data-admin="report" aria-controls="admin-report" aria-pressed="false">Reports</button>
+            <button type="button" data-admin="audit" aria-controls="admin-audit" aria-pressed="false">Audit log</button>
+            <button type="button" data-admin="accounts" aria-controls="admin-accounts" aria-pressed="false">Accounts</button>
         </nav>
         <section class="panel" id="admin-zones">
             <div class="section-heading"><h2>Parking zones</h2><button id="add-zone" class="primary" type="button">Add zone</button></div>

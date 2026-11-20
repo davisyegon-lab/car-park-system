@@ -18,7 +18,9 @@ let activeSessions = [];
 let adminSection = 'zones';
 let dialogSubmit;
 let generation = 0;
-let dashboardRequest = 0;
+let availabilityRequest;
+let dashboardStale = false;
+const mobileNavigation = matchMedia('(max-width: 700px)');
 let amsRequest = 0;
 let sessionsRequest = 0;
 let reportRequest = 0;
@@ -32,11 +34,11 @@ const bayStatuses = { available: 'Vacant', pending: 'Selected', occupied: 'Occup
 function notify(message, error = false, target = 'notice') {
     const element = $(target) || $('notice');
     element.textContent = message;
-    element.hidden = !message;
+    if (target !== 'login-error') element.hidden = !message;
     element.classList.toggle('error', error);
 }
 
-async function api(action, data, params = {}) {
+async function api(action, data, params = {}, signal) {
     const requestGeneration = generation;
     const query = new URLSearchParams({ action, ...params });
     const options = data === undefined ? {} : {
@@ -45,22 +47,23 @@ async function api(action, data, params = {}) {
         body: JSON.stringify(data),
     };
     const url = `api.php?${query}`;
-    const response = await fetch(url, options).catch(() => {
+    const response = await fetch(url, { ...options, signal }).catch(() => {
         throw new Error(data === undefined ? 'Could not connect. Refresh and try again.' : 'The server did not confirm the change. Refresh and check the record before retrying.');
     });
     const result = await response.json().catch(() => {
         throw new Error(data === undefined ? 'The server could not load parking data.' : 'The server did not confirm the change. Refresh and check the record before retrying.');
     });
-    if (requestGeneration !== generation) return null;
+    if (requestGeneration !== generation || signal?.aborted) return null;
     if (!response.ok) {
         if (currentUser && (response.status === 401 || (response.status === 403 && result.error?.startsWith('Your session token')))) {
             const state = await api('state');
+            if (requestGeneration !== generation || signal?.aborted) return null;
             if (state && !state.user) {
                 csrf = state.csrf;
                 updateUser(null);
-                show('login');
                 if ($('action-dialog').open) $('action-dialog').close();
-                notify('Your session ended. Sign in again.', true);
+                show('login', true);
+                notify('Your session ended. Sign in again.', true, 'login-error');
                 return null;
             }
         }
@@ -71,13 +74,18 @@ async function api(action, data, params = {}) {
 }
 
 function updateUser(user) {
+    cancelAvailability();
     generation++;
+    dashboardStale = false;
+    $('updated').hidden = true;
+    $('dashboard-status').textContent = '';
     currentUser = user;
     $('navigation').hidden = !user;
     $('menu-toggle').hidden = !user;
     $('logout').hidden = !user;
     const canUseGate = ['security', 'admin'].includes(user?.role);
     $('student-bay-help').hidden = Boolean(user) && user.role !== 'student';
+    $('simulation-scope').hidden = Boolean(user);
     $('admin-bay-help').hidden = user?.role !== 'admin';
     document.querySelector('[data-screen="gate"]').hidden = !canUseGate;
     $('open-gate').hidden = !canUseGate;
@@ -105,7 +113,8 @@ function updateUser(user) {
     }
 }
 
-function show(page) {
+function show(page, moveFocus = false) {
+    if (page !== screen) cancelAvailability();
     screen = page;
     $('open-login').hidden = Boolean(currentUser) || page === 'login';
     setMenu(false);
@@ -114,6 +123,7 @@ function show(page) {
         if (button.dataset.screen === page) button.setAttribute('aria-current', 'page');
         else button.removeAttribute('aria-current');
     });
+    if (moveFocus) $(`${page}-title`).focus();
 }
 
 function setMenu(open) {
@@ -131,15 +141,17 @@ function zoneCards(id, zones) {
     const paginated = id === 'dashboard-zones';
     const role = currentUser?.role || 'guest';
     const interactive = paginated && ['guest', 'student', 'admin'].includes(role);
-    const signature = JSON.stringify([zones, [...bayPages], role]);
+    const signature = JSON.stringify([zones, paginated ? [...bayPages] : [], role]);
     if (container.dataset.snapshot === signature && container.childElementCount) return;
     const before = new Map([...container.querySelectorAll('.zone-card')].map((card) =>
         [card.dataset.zoneId, Number(card.dataset.occupied)]));
-    const focused = container.contains(document.activeElement) ? document.activeElement.id : '';
+    const active = document.activeElement;
+    const focused = container.contains(active) ? active : null;
+    const focusedZone = focused?.closest('[data-zone-id]')?.dataset.zoneId;
     container.dataset.snapshot = signature;
     container.innerHTML = zones.map((zone) => `
-        <article class="panel zone-card" ${id === 'dashboard-zones' ? `id="zone-${Number(zone.id)}" tabindex="-1"` : ''} data-zone-id="${Number(zone.id)}" data-occupied="${Number(zone.occupied)}">
-            <div class="section-heading"><div class="zone-title"><span class="zone-code">${zoneCode(zone.id)}</span><h3>${escape(zone.name)}</h3></div>
+        <article class="panel zone-card" ${paginated ? `id="zone-${Number(zone.id)}" tabindex="-1" aria-labelledby="zone-title-${Number(zone.id)}"` : ''} data-zone-id="${Number(zone.id)}" data-occupied="${Number(zone.occupied)}">
+            <div class="section-heading"><div class="zone-title"><span class="zone-code">${zoneCode(zone.id)}</span><h3${paginated ? ` id="zone-title-${Number(zone.id)}"` : ''}>${escape(zone.name)}</h3></div>
                 <span class="pill ${Number(zone.available) === 0 ? 'warning' : ''}">${zone.available} available</span>
             </div>
             <p class="muted">${escape(zone.description)}</p>
@@ -147,7 +159,11 @@ function zoneCards(id, zones) {
             <p>${zone.occupied} of ${zone.capacity} occupied</p>
             ${interactive && role !== 'admin' ? `<p id="bay-notice-${Number(zone.id)}" class="notice" role="status" hidden></p>` : ''}
         </article>`).join('') || '<p>No active parking zones.</p>';
-    if (focused) $(focused)?.focus({ preventScroll: true });
+    if (focused) {
+        const control = $(focused.id);
+        const target = (control && !control.disabled && control) || (focusedZone && $(`zone-${focusedZone}`)) || $('dashboard-title');
+        target.focus({ preventScroll: true });
+    }
 }
 
 function renderCampus(zones) {
@@ -158,10 +174,19 @@ function renderCampus(zones) {
         const markup = zone
             ? `<a href="#zone-${id}" class="lot-link"><span class="zone-code">${code}</span><strong>${name}</strong><span class="lot-count ${Number(zone.available) === 0 ? 'lot-full' : ''}">${Number(zone.available)} available</span></a>`
             : `<div class="lot-link lot-unavailable"><span class="zone-code">${code}</span><strong>${name}</strong></div>`;
-        if (area.dataset.snapshot !== markup || !area.childElementCount) {
+        if (area.dataset.snapshot === markup && area.childElementCount) continue;
+        const link = area.querySelector('a');
+        if (link && zone) {
+            link.querySelector('strong').textContent = zone.name;
+            const count = link.querySelector('.lot-count');
+            count.textContent = `${Number(zone.available)} available`;
+            count.classList.toggle('lot-full', Number(zone.available) === 0);
+        } else {
+            const wasFocused = link === document.activeElement;
             area.innerHTML = markup;
-            area.dataset.snapshot = markup;
+            if (wasFocused) $('campus-map-title').focus({ preventScroll: true });
         }
+        area.dataset.snapshot = markup;
     }
 }
 
@@ -199,18 +224,19 @@ function parkingTiles(zone, phase, previousOccupied, interactive = false, pagina
         const description = `${label}, ${bay?.mine ? 'occupied by you' : bayStatuses[status]}${bay?.label ? `, ${bay.label}` : ''}`;
         const canClick = interactive && (status === 'available' || (currentUser?.role === 'admin' ? status !== 'occupied' : bay?.mine));
         const car = ['occupied', 'pending'].includes(status) ? '<svg class="icon" aria-hidden="true"><use href="#i-car"/></svg>' : '';
-        const content = `${car}<span>${label}</span>${bay?.mine ? '<span class="tile-owner">You</span>' : ''}`;
+        const statusText = bay?.mine ? 'You' : { booked: 'Booked', unavailable: 'Closed' }[status];
+        const content = `${car}<span>${label}</span>${statusText ? `<span class="tile-status">${statusText}</span>` : ''}`;
         const attrs = `class="parking-tile tile-${status}${changed ? ' tile-change' : ''}" title="${escape(description)}"`;
         tiles.push(canClick
             ? `<button type="button" ${attrs} id="bay-${zoneId}-${number}" data-bay="${number}" data-zone-id="${zoneId}" data-status="${status}" aria-label="${escape(description)}">${content}</button>`
             : `<span ${attrs} role="img" aria-label="${escape(description)}"><span class="tile-label" aria-hidden="true">${content}</span></span>`);
     }
     const pager = paginated && pages > 1 ? `<div class="bay-pages">
-        <button type="button" data-bay-page="${page - 1}" data-zone-id="${zoneId}" ${page === 0 ? 'disabled' : ''}>Previous bays</button>
-        <small>${start}–${end} of ${capacity}</small>
-        <button type="button" data-bay-page="${page + 1}" data-zone-id="${zoneId}" ${page === pages - 1 ? 'disabled' : ''}>Next bays</button>
+        <button type="button" id="previous-bays-${zoneId}" aria-describedby="bay-range-${zoneId}" data-bay-page="${page - 1}" data-zone-id="${zoneId}" ${page === 0 ? 'disabled' : ''}>Previous bays</button>
+        <small id="bay-range-${zoneId}">Bays ${start}–${end} of ${capacity}</small>
+        <button type="button" id="next-bays-${zoneId}" aria-describedby="bay-range-${zoneId}" data-bay-page="${page + 1}" data-zone-id="${zoneId}" ${page === pages - 1 ? 'disabled' : ''}>Next bays</button>
         </div>` : '';
-    return `<div class="parking-tiles">${tiles.join('')}</div>${pager}`;
+    return `${pager}<div class="parking-tiles">${tiles.join('')}</div>`;
 }
 
 function manageBay(zone, number, current) {
@@ -244,19 +270,64 @@ function renderAssignment() {
     $('assignment-map').dataset.phase = phase;
 }
 
-async function loadDashboard(poll = false) {
-    const request = ++dashboardRequest;
-    const result = await api(currentUser ? 'dashboard' : 'availability', undefined, poll ? { poll: '1' } : {});
-    if (!result || request !== dashboardRequest) return;
-    if (screen === 'dashboard') {
-        dashboardZones = result.zones;
-        renderDashboardMap();
-        $('updated').textContent = `Updated ${new Date().toLocaleTimeString([], { timeZone: 'Africa/Nairobi', hour: '2-digit', minute: '2-digit', second: '2-digit' })} EAT`;
+function cancelAvailability() {
+    availabilityRequest?.controller.abort();
+    availabilityRequest = null;
+    $('refresh-dashboard').removeAttribute('aria-disabled');
+}
+
+function availabilityStatus(message, error = false) {
+    const status = $('dashboard-status');
+    status.classList.toggle('error', error);
+    if (status.textContent !== message) status.textContent = message;
+}
+
+async function loadDashboard({ poll = false, manual = false } = {}) {
+    if (poll && (screen !== 'dashboard' || document.hidden || availabilityRequest)) return;
+    if (manual && availabilityRequest?.manual) return;
+    cancelAvailability();
+
+    const page = screen;
+    const controller = new AbortController();
+    const request = { controller, manual };
+    availabilityRequest = request;
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    if (manual) {
+        $('refresh-dashboard').setAttribute('aria-disabled', 'true');
+        availabilityStatus('Refreshing availability…');
     }
-    if (screen === 'gate') {
-        gateZones = result.zones;
-        setOptions($('checkin-zone'), availableZones(), 'Select a zone');
-        renderAssignment();
+    try {
+        const result = await api(currentUser ? 'dashboard' : 'availability', undefined, poll ? { poll: '1' } : {}, controller.signal);
+        if (availabilityRequest !== request) return;
+        if (controller.signal.aborted) throw new Error('Availability request timed out.');
+        if (!result) return;
+        if (page === 'dashboard') {
+            dashboardZones = result.zones;
+            renderDashboardMap();
+            const time = new Date().toLocaleTimeString([], { timeZone: 'Africa/Nairobi', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            $('updated').textContent = `Updated ${time} EAT`;
+            $('updated').hidden = false;
+            if (manual || dashboardStale) availabilityStatus('Availability is up to date.');
+            dashboardStale = false;
+        } else if (page === 'gate') {
+            gateZones = result.zones;
+            setOptions($('checkin-zone'), availableZones(), 'Select a zone');
+            renderAssignment();
+        }
+    } catch (error) {
+        if (availabilityRequest !== request) return;
+        if (page !== 'dashboard') throw error;
+        const showingPrevious = !$('updated').hidden;
+        const message = showingPrevious ? 'Could not refresh availability. Showing the last available data.'
+            : 'Could not load availability. Select Refresh availability to try again.';
+        availabilityStatus(message, true);
+        dashboardStale = true;
+    } finally {
+        clearTimeout(timeout);
+        if (availabilityRequest === request) {
+            availabilityRequest = null;
+            $('refresh-dashboard').removeAttribute('aria-disabled');
+        }
     }
 }
 
@@ -449,12 +520,16 @@ function gateDialog(operation, session) {
 
 function run(event, work, errorTarget = 'notice') {
     const form = event.type === 'submit' ? event.currentTarget : null;
-    if (form?.dataset.saving === 'true') return;
-    if (form) form.dataset.saving = 'true';
     const button = event.submitter || form?.querySelector('[type="submit"]') || event.currentTarget;
-    if (button instanceof HTMLButtonElement) button.disabled = true;
-    void Promise.resolve().then(work).catch((error) => notify(error.message, true, errorTarget)).finally(() => {
-        if (button instanceof HTMLButtonElement) button.disabled = false;
+    const lock = button instanceof HTMLButtonElement && (form || button.matches('[data-bay], #logout, #refresh-active'));
+    if (form?.dataset.saving === 'true' || (lock && button.getAttribute('aria-disabled') === 'true')) return;
+    if (form) form.dataset.saving = 'true';
+    if (lock) button.setAttribute('aria-disabled', 'true');
+    void Promise.resolve().then(work).catch((error) => {
+        if ($(errorTarget)?.closest('[hidden]:not(.notice)')) return;
+        notify(error.message, true, errorTarget);
+    }).finally(() => {
+        if (lock) button.removeAttribute('aria-disabled');
         if (form) delete form.dataset.saving;
     });
 }
@@ -492,38 +567,50 @@ function renderTour() {
 $('login-form').addEventListener('submit', (event) => {
     event.preventDefault();
     run(event, async () => {
-        notify('');
+        notify('', false, 'login-error');
         const result = await api('login', Object.fromEntries(new FormData(event.target)));
         if (!result) return;
         event.target.reset();
         updateUser(result.user);
-        show('dashboard');
+        show('dashboard', true);
         await loadDashboard();
-    });
+    }, 'login-error');
 });
 $('logout').addEventListener('click', (event) => run(event, async () => {
     if (!await api('logout', {})) return;
     updateUser(null);
-    show('dashboard');
+    show('dashboard', true);
     notify('Signed out.');
     await loadDashboard();
 }));
 $('menu-toggle').addEventListener('click', () => setMenu($('navigation').dataset.open !== 'true'));
+mobileNavigation.addEventListener('change', ({ matches }) => {
+    if (matches && $('navigation').contains(document.activeElement)) $('menu-toggle').focus();
+    setMenu(false);
+});
 document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && $('navigation').dataset.open === 'true') {
+    const inMenu = $('navigation').contains(event.target) || event.target === $('menu-toggle');
+    if (event.key === 'Escape' && mobileNavigation.matches && inMenu && $('navigation').dataset.open === 'true') {
         setMenu(false);
         $('menu-toggle').focus();
     }
 });
-all('[data-screen], [data-open-screen]').forEach((button) => button.addEventListener('click', (event) => run(event, async () => {
+all('[data-screen], [data-open-screen]').forEach((button) => button.addEventListener('click', (event) => {
+    const page = button.dataset.screen || button.dataset.openScreen;
     notify('');
-    show(button.dataset.screen || button.dataset.openScreen);
-    $(`${screen}-title`).setAttribute('tabindex', '-1');
-    $(`${screen}-title`).focus({ preventScroll: true });
-    if (screen === 'dashboard') await loadDashboard();
-    if (screen === 'gate') await Promise.all([loadDashboard(), loadAms(), loadActive()]);
-    if (screen === 'admin') await loadAdmin('zones');
-})));
+    notify('', false, 'login-error');
+    show(page, true);
+    run(event, async () => {
+        try {
+            if (page === 'dashboard') await loadDashboard();
+            if (page === 'gate') await Promise.all([loadDashboard(), loadAms(), loadActive()]);
+            if (page === 'admin') await loadAdmin('zones');
+        } catch (error) {
+            if (screen === page) throw error;
+        }
+    });
+}));
+$('refresh-dashboard').addEventListener('click', () => { void loadDashboard({ manual: true }); });
 all('[data-admin]').forEach((button) => button.addEventListener('click', (event) => run(event, () => loadAdmin(button.dataset.admin))));
 all('[data-demo]').forEach((button) => button.addEventListener('click', () => {
     const form = $('login-form');
@@ -601,7 +688,10 @@ $('dashboard-zones').addEventListener('click', (event) => {
         const zoneId = Number(control.dataset.zoneId);
         bayPages.set(zoneId, Number(control.dataset.bayPage));
         renderDashboardMap();
-        $(`zone-${zoneId}`).focus({ preventScroll: true });
+        const sameControl = $(control.id);
+        const target = sameControl && !sameControl.disabled ? sameControl
+            : $(`zone-${zoneId}`).querySelector('[data-bay-page]:enabled');
+        target?.focus({ preventScroll: true });
         return;
     }
     const button = event.target.closest('[data-bay]');
@@ -612,14 +702,14 @@ $('dashboard-zones').addEventListener('click', (event) => {
     if (!currentUser) {
         const target = `bay-notice-${Number(zone.id)}`;
         if (simulatedBay && current !== 'occupied') {
-            notify('Click your red bay again to leave before choosing another.', true, target);
+            notify('Select your occupied bay again to leave before choosing another.', true, target);
             return;
         }
         const leaving = current === 'occupied';
         simulatedBay = leaving ? null : { zoneId: Number(zone.id), number };
         renderDashboardMap();
         $(`bay-${Number(zone.id)}-${number}`)?.focus({ preventScroll: true });
-        notify(leaving ? 'Departure simulated. The bay is vacant.' : 'Arrival simulated. Click your red bay again to leave.', false, target);
+        notify(leaving ? 'Departure simulated. The bay is vacant.' : 'Arrival simulated. Select your occupied bay again to leave.', false, target);
     } else if (currentUser.role === 'admin') {
         manageBay(zone, number, current);
     } else if (currentUser.role === 'student') {
@@ -676,10 +766,9 @@ $('tour-next').addEventListener('click', () => {
     }
 });
 
-setInterval(() => {
-    if (screen !== 'dashboard' || document.hidden) return;
-    loadDashboard(true).catch((error) => { $('updated').textContent = error.message; });
-}, 10000);
+const pollDashboard = () => { void loadDashboard({ poll: true }); };
+setInterval(pollDashboard, 10000);
+document.addEventListener('visibilitychange', pollDashboard);
 
 async function initialize() {
     const state = await api('state');

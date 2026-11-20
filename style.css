@@ -20,7 +20,7 @@ button, input, select { font: inherit; }
 button { cursor: pointer; }
 button, input, select { min-width: 0; border: 1px solid #c6d2dd; border-radius: 8px; padding: .54rem .75rem; color: var(--ink); background: var(--white); }
 button:hover:where(:not(.parking-tile)) { background: #e9eff5; }
-button:disabled { cursor: default; opacity: .55; }
+button:disabled, button[aria-disabled="true"] { cursor: default; opacity: .55; }
 :focus-visible { outline: 3px solid #147b92; outline-offset: 2px; }
 input, select { width: 100%; min-height: 42px; }
 input[type="checkbox"] { width: 1.05rem; min-height: 0; accent-color: var(--accent); }
@@ -72,6 +72,7 @@ details p { margin: .5rem 0; }
 #admin-report h3 { margin-top: 1rem; margin-bottom: .45rem; }
 #admin-report .stats { margin-top: .85rem; }
 .notice { background: #e1f3ea; color: #164f3e; border: 1px solid #a8d7c4; border-radius: 8px; padding: .67rem .8rem; margin-bottom: 1rem; }
+#dashboard-status:empty, #login-error:empty { padding: 0; margin: 0; border: 0; }
 .error { background: #fff0ed; color: #8b2920; border-color: #f0c0b7; }
 dialog { max-width: min(92vw, 485px); width: 100%; max-height: 88vh; overflow: auto; border: 1px solid var(--line); border-radius: 15px; padding: 1.5rem; color: var(--ink); box-shadow: 0 16px 50px #102a3b38; }
 dialog::backdrop { background: #102a3b86; }
@@ -104,6 +105,7 @@ dialog h2, dialog h3 { margin-bottom: .5rem; }
     mask-image: linear-gradient(to right, transparent, black);
     pointer-events: none;
 }
+.dashboard-banner :focus-visible { outline-color: #ffda79; }
 .dashboard-banner .eyebrow { color: #ffda79; }
 .dashboard-banner p:not(.eyebrow) { color: #d4e7ec; max-width: 52ch; }
 .dashboard-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
@@ -167,7 +169,7 @@ a.lot-link:hover { border-color: #94671b; background: #fff8e6; }
 .tile-booked { color: #e0efff; background: #2a5790; }
 .tile-unavailable { color: #f2f3f5; background: #555e68; }
 .tile-label { display: grid; justify-items: center; }
-.tile-owner { font-size: .57rem; }
+.tile-status { font-size: .57rem; }
 button.parking-tile:hover { filter: brightness(1.22); }
 button.parking-tile:focus-visible { outline: 2px solid #ffe49c; outline-offset: 1px; }
 .bay-pages { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; margin-top: .5rem; }
@@ -194,7 +196,13 @@ button.parking-tile:focus-visible { outline: 2px solid #ffe49c; outline-offset: 
 .login-intro .eyebrow + h1 + p { color: var(--muted); margin-top: .5rem; }
 @media (max-width: 700px) {
     .login-layout, .gate-grid { grid-template-columns: 1fr; }
-    .header nav { order: 3; width: 100%; padding-top: .5rem; border-top: 1px solid var(--line); }
+    .brand, .header-actions { width: 100%; }
+    .header nav { width: 100%; padding: .5rem 0; border-block: 1px solid var(--line); }
+    button { min-height: 44px; }
+    .parking-tiles { grid-template-columns: repeat(auto-fit, minmax(44px, 1fr)); }
+    .parking-tile { min-height: 44px; }
+    .campus-plan { grid-template-areas: "academic academic lot-a" "offices offices lot-b" "reception reception lot-c" "road road road" "entry entry entry"; }
+    .campus-building { overflow-wrap: anywhere; }
     #navigation[data-open="false"] { display: none; }
     #menu-toggle:not([hidden]) { display: inline-flex; }
     .header-inner { justify-content: flex-start; }
