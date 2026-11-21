@@ -1,5 +1,13 @@
 # Development log
 
+## 21 November 2026 EAT
+
+- Added Nairobi date windows, audit filters for event and parking session number, and report history filters for session number or campus registration, last assigned zone, and current status. Reports default to today. Audit defaults to recent events across all dates.
+- Separated gate entries and recorded exits in the selected window from live availability and occupancy. A session appears in history when it has a check-in or checkout inside the window. Transfers keep the same session and do not add another entry.
+- Replaced visitor identifying details in report history with the session number. The audit response keeps structural metadata and indicates when a reason was recorded. The gate still receives operational details for active visits and reminds officers to return retained IDs on exit.
+- PHP lint, JavaScript syntax, and all 16 integration scenarios passed locally against PHP 8.4 and MariaDB 11.8. Chromium verified the report form at 320 px and the audit form at desktop width, including keyboard submission, reset, empty results, date errors and visitor redaction.
+- Using a half-open time range makes consecutive calendar windows meet at midnight without counting midnight twice. Fixtures covered leap day, cross-midnight exits, a repeat registration and current occupancy carried in from before the reporting window.
+
 ## 20 November 2026 EAT
 
 - Aligned the mobile menu’s visual and keyboard order. Escape returns focus to the menu button, screen changes focus the destination heading, and role-specific controls identify the screens and sections they open. Sign-in errors appear in the form and keep keyboard focus on the submit button.

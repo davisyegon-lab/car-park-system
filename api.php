@@ -331,35 +331,141 @@ function changeSession(string $action, array $data, int $actor): array
     });
 }
 
-function sessions(bool $activeOnly): array
+function sessionSearch(string $query, bool $showVisitorPlates): array
+{
+    if ($query === '') {
+        return ['1 = 1', []];
+    }
+    if (str_starts_with($query, '#')) {
+        return ['CAST(s.id AS CHAR) = ?', [substr($query, 1)]];
+    }
+    $plate = $showVisitorPlates ? 'LOCATE(?, s.vehicle_plate) > 0'
+        : '(s.visitor_id IS NULL AND LOCATE(?, s.vehicle_plate) > 0)';
+    return ["($plate OR CAST(s.id AS CHAR) = ?)", [$query, $query]];
+}
+
+function activeSessions(): array
 {
     $query = strtoupper(preg_replace('/\s+/', '', field($_GET, 'q', 32, false)));
-    $filter = $activeOnly ? 'AND s.checkout_at IS NULL' : '';
-    if (str_starts_with($query, '#')) {
-        $search = 'CAST(s.id AS CHAR) = ?';
-        $params = [substr($query, 1)];
-    } else {
-        $search = "(LOCATE(?, s.vehicle_plate) > 0 OR CAST(s.id AS CHAR) = ? OR ? = '')";
-        $params = [$query, $query, $query];
-    }
+    [$search, $params] = sessionSearch($query, true);
     return sql("SELECT s.id, s.vehicle_plate, s.zone_id, s.checkin_at, s.checkout_at, z.name AS zone,
         COALESCE(m.name, v.name) AS driver, COALESCE(m.category, 'visitor') AS driver_type,
         COALESCE(v.id_retained, 0) AS id_retained, v.destination, v.purpose,
-        (s.checkout_at IS NULL AND s.checkin_at < NOW() - INTERVAL 12 HOUR) AS needs_review
+        (s.checkin_at < NOW() - INTERVAL 12 HOUR) AS needs_review
         FROM parking_sessions s JOIN parking_zones z ON z.id = s.zone_id
         LEFT JOIN users u ON u.id = s.user_id LEFT JOIN mock_ams m ON m.id = u.ams_id
         LEFT JOIN visitors v ON v.id = s.visitor_id
-        WHERE $search $filter
+        WHERE $search AND s.checkout_at IS NULL
         ORDER BY (s.vehicle_plate = ?) DESC, s.id DESC LIMIT 100", [...$params, $query])->fetchAll();
+}
+
+function activityDate(string $value, DateTimeZone $timezone): DateTimeImmutable
+{
+    if (!preg_match('/^([1-9][0-9]{3})-([0-9]{2})-([0-9]{2})$/D', $value, $parts)
+        || !checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1]) || $value === '9999-12-31') {
+        fail(422, 'Enter valid dates in YYYY-MM-DD format.');
+    }
+    return new DateTimeImmutable($value, $timezone);
+}
+
+function activityWindow(bool $defaultToday): ?array
+{
+    $from = field($_GET, 'from', 10, false);
+    $through = field($_GET, 'through', 10, false);
+    $timezone = new DateTimeZone('Africa/Nairobi');
+    if ($from === '' && $through === '') {
+        if (!$defaultToday) {
+            return null;
+        }
+        $from = $through = (new DateTimeImmutable('today', $timezone))->format('Y-m-d');
+    }
+    if ($from === '' || $through === '') {
+        fail(422, 'Choose both a start date and an end date.');
+    }
+    $start = activityDate($from, $timezone);
+    $end = activityDate($through, $timezone);
+    if ($start > $end) {
+        fail(422, 'The start date must be on or before the end date.');
+    }
+    return ['from' => $from, 'through' => $through, 'timezone' => 'Africa/Nairobi',
+        'start' => $start->format('Y-m-d H:i:s'), 'end' => $end->modify('+1 day')->format('Y-m-d H:i:s')];
+}
+
+function auditReport(): array
+{
+    $window = activityWindow(false);
+    $action = field($_GET, 'event', 30, false);
+    $session = field($_GET, 'session_id', 10, false);
+    $conditions = ['1 = 1'];
+    $params = [];
+    if ($window !== null) {
+        $conditions[] = 'a.created_at >= ? AND a.created_at < ?';
+        array_push($params, $window['start'], $window['end']);
+    }
+    if ($action !== '') {
+        $conditions[] = 'a.action = ?';
+        $params[] = $action;
+    }
+    if ($session !== '') {
+        $conditions[] = "a.entity_type = 'parking_session' AND a.entity_id = ?";
+        $params[] = integer($_GET, 'session_id');
+    }
+    $where = implode(' AND ', $conditions);
+    $logs = sql("SELECT a.id, a.action, a.entity_type, a.entity_id, a.created_at, a.metadata,
+        u.name AS actor FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+        WHERE $where ORDER BY a.created_at DESC, a.id DESC LIMIT 101", $params)->fetchAll();
+    $safeFields = array_flip(['zone_id', 'from_zone_id', 'to_zone_id', 'driver_type', 'capacity',
+        'previous_capacity', 'active', 'bay_number', 'status', 'previous_status']);
+    $visible = array_slice($logs, 0, 100);
+    foreach ($visible as &$log) {
+        $metadata = (array) json_decode($log['metadata'], true);
+        $safe = array_intersect_key($metadata, $safeFields);
+        if (isset($metadata['reason']) && $metadata['reason'] !== '') {
+            $safe['reason_recorded'] = true;
+        }
+        $log['metadata'] = json_encode((object) $safe, JSON_THROW_ON_ERROR);
+    }
+    unset($log);
+    return ['logs' => $visible, 'more' => count($logs) > 100, 'window' => $window,
+        'events' => sql('SELECT DISTINCT action FROM audit_logs ORDER BY action')->fetchAll(PDO::FETCH_COLUMN)];
 }
 
 function report(): array
 {
+    $window = activityWindow(true);
+    $bounds = [$window['start'], $window['end']];
     $counts = sql('SELECT
-        (SELECT COUNT(*) FROM parking_sessions WHERE checkin_at >= CURRENT_DATE AND checkin_at < CURRENT_DATE + INTERVAL 1 DAY) AS entries,
-        (SELECT COUNT(*) FROM parking_sessions WHERE checkout_at >= CURRENT_DATE AND checkout_at < CURRENT_DATE + INTERVAL 1 DAY) AS exits,
-        (SELECT COUNT(*) FROM parking_sessions WHERE visitor_id IS NOT NULL AND checkout_at IS NULL) AS active_visitors')->fetch();
-    return $counts + dashboard() + ['sessions' => sessions(false)];
+        (SELECT COUNT(*) FROM parking_sessions WHERE checkin_at >= ? AND checkin_at < ?) AS entries,
+        (SELECT COUNT(*) FROM parking_sessions WHERE checkout_at >= ? AND checkout_at < ?) AS exits,
+        (SELECT COUNT(*) FROM parking_sessions WHERE visitor_id IS NOT NULL AND checkout_at IS NULL) AS active_visitors',
+        [...$bounds, ...$bounds])->fetch();
+    $query = strtoupper(preg_replace('/\s+/', '', field($_GET, 'q', 32, false)));
+    [$search, $params] = sessionSearch($query, false);
+    $zone = field($_GET, 'zone_id', 10, false);
+    $status = field($_GET, 'status', 10, false);
+    $conditions = ['((s.checkin_at >= ? AND s.checkin_at < ?) OR (s.checkout_at >= ? AND s.checkout_at < ?))', $search];
+    $params = [...$bounds, ...$bounds, ...$params];
+    if ($zone !== '') {
+        $conditions[] = 's.zone_id = ?';
+        $params[] = integer($_GET, 'zone_id');
+    }
+    if ($status !== '') {
+        $conditions[] = match ($status) {
+            'active' => 's.checkout_at IS NULL',
+            'closed' => 's.checkout_at IS NOT NULL',
+            default => fail(422, 'Choose a valid session status.'),
+        };
+    }
+    $where = implode(' AND ', $conditions);
+    $sessions = sql("SELECT s.id, CASE WHEN s.visitor_id IS NULL THEN s.vehicle_plate END AS vehicle_plate,
+        s.zone_id, s.checkin_at, s.checkout_at, z.name AS zone,
+        CASE WHEN s.visitor_id IS NULL THEN m.name END AS driver,
+        CASE WHEN s.visitor_id IS NULL THEN m.category ELSE 'visitor' END AS driver_type
+        FROM parking_sessions s JOIN parking_zones z ON z.id = s.zone_id
+        LEFT JOIN users u ON u.id = s.user_id LEFT JOIN mock_ams m ON m.id = u.ams_id
+        WHERE $where ORDER BY s.checkin_at DESC, s.id DESC LIMIT 101", $params)->fetchAll();
+    return $counts + dashboard() + ['sessions' => array_slice($sessions, 0, 100), 'more' => count($sessions) > 100,
+        'window' => $window, 'history_zones' => sql('SELECT id, name, active FROM parking_zones ORDER BY name')->fetchAll()];
 }
 
 function updateAccount(array $data, int $actor): array
@@ -447,13 +553,12 @@ try {
             })(),
             'dashboard' => dashboard($user),
             'ams' => ['users' => amsUsers()],
-            'active' => ['sessions' => sessions(true)],
+            'active' => ['sessions' => activeSessions()],
             'zones' => ['zones' => zones(true)],
             'zone_create', 'zone_update', 'zone_delete' => changeZone($action, $data, $actor),
             'checkin' => checkin($data, $actor),
             'checkout', 'transfer', 'correct_checkout' => changeSession($action, $data, $actor),
-            'audit' => ['logs' => sql("SELECT a.id, a.action, a.entity_type, a.entity_id, a.created_at, a.metadata,
-                u.name AS actor FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id ORDER BY a.id DESC LIMIT 100")->fetchAll()],
+            'audit' => auditReport(),
             'report' => report(),
             'accounts' => ['accounts' => sql('SELECT u.id, u.name, u.email, u.role, u.active, m.institutional_id
                 FROM users u LEFT JOIN mock_ams m ON m.id = u.ams_id ORDER BY u.id')->fetchAll()],

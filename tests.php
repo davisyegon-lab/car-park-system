@@ -306,10 +306,16 @@ try {
         check((int) $admin->request('report')['active_visitors'] === 1, 'Visitor check-in absent from report');
         $matches = $security->request('active', 200, null, ['q' => 'DEMO 904'])['sessions'];
         check(count($matches) === 1 && (int) $matches[0]['id'] === $visitorSession, 'Plate lookup failed');
+        check($matches[0]['driver'] === 'Quinn Demo' && $matches[0]['purpose'] === 'Interview'
+            && $matches[0]['destination'] === 'Careers' && (bool) $matches[0]['id_retained'], 'Gate lost operational visitor details');
         $exact = $security->request('active', 200, null, ['q' => "#$visitorSession"])['sessions'];
         check(array_column($exact, 'id') === array_column($matches, 'id'), 'Exact session lookup failed');
-        $transfer = ['id' => $visitorSession, 'zone_id' => $zoneId, 'expected_zone_id' => 3, 'reason' => 'Officer verified the zone'];
+        $transfer = ['id' => $visitorSession, 'zone_id' => $zoneId, 'expected_zone_id' => 3, 'reason' => 'Officer verified Quinn Demo’s zone'];
+        $activityBeforeTransfer = $admin->request('report');
         $moved = $security->request('transfer', 200, $transfer);
+        $activityAfterTransfer = $admin->request('report');
+        check($activityAfterTransfer['entries'] === $activityBeforeTransfer['entries']
+            && $activityAfterTransfer['exits'] === $activityBeforeTransfer['exits'], 'Transfer changed entry or exit totals');
         check($moved['from_zone'] === 'Visitor Parking' && $moved['to_zone'] === 'Lifecycle Demo', 'Transfer confirmation omitted its zones');
         $security->request('transfer', 409, $transfer);
         $security->request('correct_checkout', 409, ['id' => $visitorSession, 'expected_zone_id' => 3, 'reason' => 'Stale view']);
@@ -349,21 +355,103 @@ try {
         $security->request('checkout', 200, ['id' => $sessions[0]['id']]);
         return 'The same normalized registration sent to two zones produced one active record and one conflict.';
     });
-    scenario('R01', 'Audit, reporting and privacy', function () use ($admin, $security, $pdo, &$visitorSession) {
+    scenario('R01', 'Audit and reports keep visitor identifiers at the gate', function () use ($admin, $security, $pdo, &$visitorSession, &$zoneId) {
         $audit = $admin->request('audit')['logs'];
         $actions = array_column($audit, 'action');
         foreach (['login', 'logout', 'zone_created', 'zone_updated', 'zone_deleted', 'zone_deactivated',
             'vehicle_entry', 'vehicle_exit', 'zone_transfer', 'checkout_corrected'] as $action) {
             check(in_array($action, $actions, true), "Missing action $action");
         }
-        $report = $admin->request('report', 200, null, ['q' => 'DEMO904']);
+        $visitorActivity = $admin->request('audit', 200, null, ['session_id' => $visitorSession])['logs'];
+        $visitorActions = array_column($visitorActivity, 'action');
+        sort($visitorActions);
+        check($visitorActions === ['checkout_corrected', 'vehicle_entry', 'zone_transfer'], 'Incorrect session audit trail');
+        $transfer = $admin->request('audit', 200, null, ['session_id' => $visitorSession, 'event' => 'zone_transfer'])['logs'];
+        check(count($transfer) === 1 && json_decode($transfer[0]['metadata'], true) === [
+            'from_zone_id' => 3, 'to_zone_id' => $zoneId, 'reason_recorded' => true,
+        ], 'Audit must preserve structural details and omit free-text reasons');
+
+        $days = $pdo->query('SELECT CURRENT_DATE - INTERVAL 1 DAY AS `from`, CURRENT_DATE AS through')->fetch();
+        $report = $admin->request('report', 200, null, $days + ['q' => "#$visitorSession"]);
         check((int) $report['entries'] >= 4 && (int) $report['exits'] >= 3, 'Daily totals missing entries or exits');
-        check(count($report['sessions']) === 1 && $report['sessions'][0]['id'] == $visitorSession
-            && $report['sessions'][0]['checkout_at'], 'Visitor history missing');
+        check(count($report['sessions']) === 1, 'Visitor history missing');
+        $session = $report['sessions'][0];
+        check($session['id'] == $visitorSession && $session['checkout_at'] && $session['driver_type'] === 'visitor'
+            && $session['vehicle_plate'] === null && $session['driver'] === null
+            && array_intersect(['destination', 'purpose', 'id_inspected', 'id_retained'], array_keys($session)) === [],
+            'Visitor history exposed private fields or lost its operational reference');
+        check($admin->request('report', 200, null, $days + ['q' => 'DEMO 904'])['sessions'] === [], 'Visitor registration matched a report search');
+        check(in_array($zoneId, array_column($report['history_zones'], 'id')), 'Inactive historical zone missing');
         $columns = $pdo->query('SHOW COLUMNS FROM visitors')->fetchAll(PDO::FETCH_COLUMN);
         check($columns === ['id', 'name', 'purpose', 'destination', 'id_inspected', 'id_retained'], 'Unexpected visitor fields');
         $security->request('report', 403);
-        return 'Found all required audit actions, daily counts and matched history. Visitor schema has no national ID number field.';
+        $security->request('audit', 403);
+        return 'Admin found the visitor by session ID. Report fields and audit reasons withheld identifiers, while gate access stayed functional.';
+    });
+    scenario('R02', 'Report window boundaries, session filters and live occupancy', function () use ($admin, $pdo) {
+        $window = ['from' => '2024-02-29', 'through' => '2024-03-01'];
+        $baseline = $admin->request('report', 200, null, $window);
+        $insert = $pdo->prepare('INSERT INTO parking_sessions (user_id, vehicle_plate, zone_id, checkin_at, checkout_at) VALUES (1, ?, ?, ?, ?)');
+        $fixtures = [
+            'carry' => ['RPTCARRY', 1, '2024-02-28 23:59:59', null],
+            'overnight' => ['RPTNIGHT', 1, '2024-02-28 23:59:59', '2024-02-29 00:00:00'],
+            'start' => ['RPTREPEAT', 1, '2024-02-29 00:00:00', '2024-03-01 12:00:00'],
+            'end' => ['RPTREPEAT', 2, '2024-03-01 23:59:59', '2024-03-02 00:00:00'],
+            'open' => ['RPTOPEN', 3, '2024-03-01 18:00:00', null],
+            'after' => ['RPTAFTER', 2, '2024-03-02 00:00:00', '2024-03-02 00:00:01'],
+            'spanning' => ['RPTSPAN', 1, '2024-02-28 20:00:00', '2024-03-02 00:00:00'],
+        ];
+        $ids = [];
+        foreach ($fixtures as $key => $values) {
+            $insert->execute($values);
+            $ids[$key] = (int) $pdo->lastInsertId();
+        }
+        $report = $admin->request('report', 200, null, $window);
+        check($report['window']['timezone'] === 'Africa/Nairobi' && $report['window']['start'] === '2024-02-29 00:00:00'
+            && $report['window']['end'] === '2024-03-02 00:00:00', 'Unexpected reporting window');
+        check((int) $report['entries'] === 3 && (int) $report['exits'] === 2, 'Incorrect counts at midnight boundaries');
+        check(array_map('intval', array_column($report['sessions'], 'id')) === [$ids['end'], $ids['open'], $ids['start'], $ids['overnight']],
+            'History missed a check-in or checkout in the window, or included an event outside it');
+        check((int) $report['occupied'] === (int) $baseline['occupied'] + 2
+            && (int) $report['available'] === (int) $baseline['available'] - 2,
+            'Live occupancy ignored either the carry-in or the current open session');
+        $filtered = $admin->request('report', 200, null, $window + ['q' => 'rpt repeat', 'zone_id' => 2, 'status' => 'closed']);
+        check(array_map('intval', array_column($filtered['sessions'], 'id')) === [$ids['end']], 'History filters failed to intersect');
+        check($filtered['entries'] === $report['entries'] && $filtered['exits'] === $report['exits'] && $filtered['occupied'] === $report['occupied'],
+            'Session filters changed campus totals');
+        $today = (new DateTimeImmutable('now', new DateTimeZone('Africa/Nairobi')))->format('Y-m-d');
+        $default = $admin->request('report')['window'];
+        check($default['from'] === $today && $default['through'] === $today, 'Report did not default to today in Nairobi');
+        foreach ([['from' => '2024-02-29'], ['from' => '2023-02-29', 'through' => '2023-03-01'],
+            ['from' => '2024-03-02', 'through' => '2024-03-01'], ['status' => 'unknown']] as $invalid) {
+            $admin->request('report', 422, null, $invalid);
+        }
+        return 'Leap day, inclusive final day, exclusive next midnight, repeat entry, cross-midnight exit, filters and an independent live snapshot passed.';
+    });
+    scenario('R03', 'Audit applies date, event and session filters before the row limit', function () use ($admin, $pdo) {
+        $window = ['from' => '2024-03-01', 'through' => '2024-03-01'];
+        $insert = $pdo->prepare('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, created_at, metadata) VALUES (3, ?, ?, 42, ?, ?)');
+        $meta = '{"zone_id":3,"reason":"Fictional visitor’s credential number","destination":"Private destination"}';
+        $insert->execute(['vehicle_entry', 'parking_session', '2024-02-29 23:59:59', $meta]);
+        $insert->execute(['vehicle_entry', 'parking_session', '2024-03-01 00:00:00', $meta]);
+        $first = (int) $pdo->lastInsertId();
+        $insert->execute(['vehicle_entry', 'parking_session', '2024-03-01 23:59:59', $meta]);
+        $last = (int) $pdo->lastInsertId();
+        $insert->execute(['vehicle_entry', 'parking_session', '2024-03-02 00:00:00', $meta]);
+        for ($i = 0; $i < 101; $i++) {
+            $insert->execute(['zone_updated', 'zone', '2024-03-01 23:59:59', '{}']);
+        }
+        $all = $admin->request('audit', 200, null, $window);
+        check(count($all['logs']) === 100 && $all['more'], 'Audit result did not report truncation');
+        $matching = $admin->request('audit', 200, null, $window + ['event' => 'vehicle_entry', 'session_id' => 42]);
+        check(array_map('intval', array_column($matching['logs'], 'id')) === [$last, $first] && !$matching['more'],
+            'Audit filters did not use inclusive day boundaries before applying the limit');
+        check(json_decode($matching['logs'][0]['metadata'], true) === ['zone_id' => 3, 'reason_recorded' => true],
+            'Legacy audit metadata leaked private fields');
+        check($admin->request('audit', 200, null, $window + ['session_id' => 42, 'event' => 'zone_updated'])['logs'] === [],
+            'Session filter included a zone entity with the same ID');
+        $admin->request('audit', 422, null, ['through' => '2024-03-01']);
+        return 'Two in-window matches survived 101 newer events, and only structural audit metadata was returned.';
     });
     scenario('S01', 'Injection protection and account administration', function () use ($admin, $url) {
         $client = new Client($url);

@@ -23,7 +23,7 @@ let dashboardStale = false;
 const mobileNavigation = matchMedia('(max-width: 700px)');
 let amsRequest = 0;
 let sessionsRequest = 0;
-let reportRequest = 0;
+let activityRequest = 0;
 let assignment = null;
 let dashboardZones = [];
 let simulatedBay = null;
@@ -96,9 +96,14 @@ function updateUser(user) {
         $('ams-search').value = '';
         $('plate-search').value = '';
         $('active-summary').textContent = '';
-        $('history-search').value = '';
+        for (const section of ['report', 'audit']) {
+            $(`${section}-filters`).reset();
+            $(`${section}-status`).textContent = '';
+            $(`${section}-results`).hidden = true;
+        }
+        $('report-window').textContent = '';
         for (const id of ['ams-users', 'checkin-zone', 'dashboard-stats', 'dashboard-zones', 'active-list',
-            'zone-list', 'report-stats', 'report-zones', 'history-list', 'audit-list', 'account-list', 'action-fields', 'assignment-map']) {
+            'zone-list', 'report-period-stats', 'report-stats', 'report-zones', 'history-list', 'audit-list', 'account-list', 'action-fields', 'assignment-map']) {
             $(id).replaceChildren();
         }
         for (const [, code] of campusZones) $(`campus-zone-${code.toLowerCase()}`).replaceChildren();
@@ -364,7 +369,7 @@ function availableZones(exclude = 0) {
 
 function optionMarkup(items, placeholder) {
     return `<option value="">${escape(placeholder)}</option>` + items.map(({ id, label, disabled }) =>
-        `<option value="${id}" ${disabled ? 'disabled' : ''}>${escape(label)}</option>`).join('');
+        `<option value="${escape(id)}" ${disabled ? 'disabled' : ''}>${escape(label)}</option>`).join('');
 }
 
 function setOptions(select, items, placeholder) {
@@ -413,7 +418,7 @@ async function loadAdmin(section = adminSection) {
         button.setAttribute('aria-pressed', selected);
         $(`admin-${button.dataset.admin}`).hidden = !selected;
     });
-    if (section === 'report') return loadReport();
+    if (section === 'report' || section === 'audit') return loadAdminActivity(section);
     const result = await api(section);
     if (!result) return;
     if (section === 'zones') {
@@ -422,13 +427,6 @@ async function loadAdmin(section = adminSection) {
             `<small>${escape(zone.description)}</small><small>${zone.occupied} / ${zone.capacity} occupied · ${Number(zone.active) ? 'Active' : 'Inactive'}</small>`,
             `<button data-zone="edit" data-id="${zone.id}">Edit</button><button data-zone="delete" data-id="${zone.id}">Delete</button>`,
         )).join('') || '<p>No zones. Add one to get started.</p>';
-    } else if (section === 'audit') {
-        $('audit-list').innerHTML = result.logs.map((log) => {
-            const details = Object.entries(JSON.parse(log.metadata)).map(([key, value]) =>
-                `${key.replaceAll('_', ' ')}: ${value}`).join(' · ');
-            return record(escape(log.action.replaceAll('_', ' ')),
-                `<small>${escape(log.actor || 'Unauthenticated')} · ${timestamp(log.created_at)} · ${escape(log.entity_type)} ${log.entity_id ?? ''}</small><small>${escape(details)}</small>`);
-        }).join('') || '<p>No audit events.</p>';
     } else {
         $('account-list').innerHTML = result.accounts.map((account) => record(escape(account.name),
             `<small>${escape(account.email)} · ${roles[account.role]} · ${Number(account.active) ? 'Active' : 'Inactive'}</small>
@@ -439,18 +437,66 @@ async function loadAdmin(section = adminSection) {
     }
 }
 
-async function loadReport() {
-    const request = ++reportRequest;
-    const result = await api('report', undefined, { q: $('history-search').value });
-    if (!result || request !== reportRequest) return;
-    stats('report-stats', [['Occupied', result.occupied], ['Available', result.available], ['Entries today', result.entries],
-        ['Exits today', result.exits], ['Active visitors', result.active_visitors]]);
+const activityLabel = (value) => value.replaceAll('_', ' ').replace(/^./, (first) => first.toUpperCase());
+const activityRange = (window) => window.from === window.through ? `${window.from} EAT`
+    : `${window.from} through ${window.through} EAT`;
+
+async function loadAdminActivity(section) {
+    const request = ++activityRequest;
+    const isCurrent = () => request === activityRequest && screen === 'admin' && adminSection === section;
+    const status = $(`${section}-status`);
+    const results = $(`${section}-results`);
+    status.textContent = 'Loading results…';
+    status.classList.remove('error');
+    results.hidden = true;
+    try {
+        const result = await api(section, undefined, Object.fromEntries(new FormData($(`${section}-filters`))));
+        if (!result || !isCurrent()) return;
+        if (section === 'report') renderReport(result);
+        else renderAudit(result);
+        const count = section === 'report' ? result.sessions.length : result.logs.length;
+        const noun = section === 'report' ? 'session' : 'event';
+        const summary = result.more ? `Showing the first 100 ${noun}s. Narrow the filters for more specific results.`
+            : `${count} matching ${noun}${count === 1 ? '' : 's'}.`;
+        status.textContent = section === 'audit' && result.window ? `${activityRange(result.window)}. ${summary}` : summary;
+        results.hidden = false;
+    } catch (error) {
+        if (!isCurrent()) return;
+        status.classList.add('error');
+        status.textContent = error.message;
+    }
+}
+
+function renderAudit(result) {
+    setOptions($('audit-filters').elements.event, result.events.map((action) => ({
+        id: action, label: activityLabel(action),
+    })), 'All events');
+    $('audit-list').innerHTML = result.logs.map((log) => {
+        const details = Object.entries(JSON.parse(log.metadata)).map(([key, value]) => {
+            if (key === 'reason_recorded') return 'Reason recorded';
+            const label = activityLabel(key);
+            if (typeof value === 'boolean') return `${label}: ${value ? 'Yes' : 'No'}`;
+            return `${label}: ${value}`;
+        }).join(' · ');
+        return record(escape(activityLabel(log.action)),
+            `<small>${escape(log.actor || 'Unauthenticated')} · ${timestamp(log.created_at)} · ${escape(activityLabel(log.entity_type))} ${escape(log.entity_id)}</small>
+             ${details ? `<small>${escape(details)}</small>` : ''}`);
+    }).join('');
+}
+
+function renderReport(result) {
+    setOptions($('report-filters').elements.zone_id, result.history_zones.map((zone) => ({
+        id: zone.id, label: Number(zone.active) ? zone.name : `${zone.name} (inactive)`,
+    })), 'All zones');
+    $('report-window').textContent = activityRange(result.window);
+    stats('report-period-stats', [['Gate entries', result.entries], ['Recorded exits', result.exits]]);
+    stats('report-stats', [['Occupied now', result.occupied], ['Available now', result.available], ['Active visitor sessions', result.active_visitors]]);
     zoneCards('report-zones', result.zones);
     $('history-list').innerHTML = result.sessions.map((session) => record(
-        `${escape(session.vehicle_plate)} · #${session.id}`,
-        `<small>${escape(session.driver)} · ${escape(session.zone)}</small>
-         <small>Entry ${timestamp(session.checkin_at)} · ${session.checkout_at ? `Exit ${timestamp(session.checkout_at)}` : 'Active'}</small>`,
-    )).join('') || '<p>No matching sessions.</p>';
+        session.driver_type === 'visitor' ? `Visitor session #${Number(session.id)}` : `${escape(session.vehicle_plate)} · #${Number(session.id)}`,
+        `<small>${escape(session.driver || 'Visitor')} · ${escape(session.zone)}</small>
+         <small>Entry ${timestamp(session.checkin_at)} · ${session.checkout_at ? `Exit ${timestamp(session.checkout_at)}` : 'Active now'}</small>`,
+    )).join('');
 }
 
 function toggleVisitorFields() {
@@ -664,7 +710,17 @@ $('checkin-form').addEventListener('submit', (event) => {
 $('refresh-active').addEventListener('click', (event) => run(event, () => Promise.all([loadActive(), loadDashboard()])));
 onSearch('ams-search', loadAms);
 onSearch('plate-search', loadActive);
-onSearch('history-search', loadReport);
+for (const section of ['report', 'audit']) {
+    const form = $(`${section}-filters`);
+    form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        void loadAdminActivity(section);
+    });
+    form.querySelector('[data-reset-filters]').addEventListener('click', () => {
+        form.reset();
+        void loadAdminActivity(section);
+    });
+}
 $('add-zone').addEventListener('click', () => zoneDialog('add'));
 $('zone-list').addEventListener('click', (event) => {
     const button = event.target.closest('[data-zone]');

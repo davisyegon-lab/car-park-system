@@ -146,13 +146,53 @@ header('Content-Security-Policy: default-src \'self\'; base-uri \'none\'; frame-
             <div id="zone-list" class="record-list"></div>
         </section>
         <section class="panel" id="admin-report" hidden>
-            <h2>Parking activity</h2><div id="report-stats" class="stats"></div>
-            <h3>Zone usage</h3><div id="report-zones" class="zone-grid"></div>
-            <h3>Session history</h3>
-            <label>Find a session <input id="history-search" type="search" maxlength="32" placeholder="Registration or session number"></label>
-            <div id="history-list" class="record-list"></div>
+            <h2>Parking activity</h2>
+            <form id="report-filters" class="activity-filters" aria-describedby="report-window-help">
+                <p id="report-window-help" class="muted">Dates use Nairobi time (EAT) and include both selected days. Leave both dates blank for today.</p>
+                <div class="filter-fields">
+                    <label>From <input type="date" name="from"></label>
+                    <label>Through <input type="date" name="through"></label>
+                </div>
+                <fieldset>
+                    <legend>Session history filters</legend>
+                    <div class="filter-fields">
+                        <label>Session number or campus registration <input type="search" name="q" maxlength="32" placeholder="#12 or DEMO001"></label>
+                        <label>Last assigned zone <select name="zone_id"><option value="">All zones</option></select></label>
+                        <label>Current session status <select name="status"><option value="">All statuses</option><option value="active">Active now</option><option value="closed">Checked out</option></select></label>
+                    </div>
+                </fieldset>
+                <div class="filter-actions"><button type="submit" class="primary">Apply filters</button><button type="button" data-reset-filters>Reset</button></div>
+            </form>
+            <p id="report-status" class="activity-status" role="status"></p>
+            <div id="report-results" hidden>
+                <h3>Gate activity in the selected window</h3>
+                <p id="report-window" class="muted"></p>
+                <p class="muted">Entries count gate check-ins. Exits count recorded checkouts, including corrections. Transfers stay within the same session.</p>
+                <div id="report-period-stats" class="stats"></div>
+                <h3>Current occupancy and availability</h3>
+                <p class="muted">Occupied spaces count vehicles currently signed in at the gate and student bay simulations. Booked and closed bays reduce availability.</p>
+                <div id="report-stats" class="stats"></div>
+                <div id="report-zones" class="zone-grid"></div>
+                <h3>Session history</h3>
+                <p class="muted">History includes sessions with an entry or exit during the window. Use the session number for visitor lookups.</p>
+                <div id="history-list" class="record-list"></div>
+            </div>
         </section>
-        <section class="panel" id="admin-audit" hidden><h2>Audit log</h2><div id="audit-list" class="record-list"></div></section>
+        <section class="panel" id="admin-audit" hidden>
+            <h2>Audit log</h2>
+            <form id="audit-filters" class="activity-filters" aria-describedby="audit-window-help">
+                <p id="audit-window-help" class="muted">Dates use Nairobi time (EAT) and include both selected days. Leave both dates blank to see recent events across all dates.</p>
+                <div class="filter-fields">
+                    <label>From <input type="date" name="from"></label>
+                    <label>Through <input type="date" name="through"></label>
+                    <label>Event <select name="event"><option value="">All events</option></select></label>
+                    <label>Parking session number <input type="text" name="session_id" inputmode="numeric" pattern="[1-9][0-9]*" maxlength="10" placeholder="12"></label>
+                </div>
+                <div class="filter-actions"><button type="submit" class="primary">Apply filters</button><button type="button" data-reset-filters>Reset</button></div>
+            </form>
+            <p id="audit-status" class="activity-status" role="status"></p>
+            <div id="audit-results" hidden><div id="audit-list" class="record-list"></div></div>
+        </section>
         <section class="panel" id="admin-accounts" hidden><h2>Demo accounts</h2><div id="account-list" class="record-list"></div></section>
     </section>
     <noscript><p>This application requires JavaScript to sign in and load parking records.</p></noscript>

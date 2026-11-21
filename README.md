@@ -44,6 +44,14 @@ All demo accounts use `ParkingDemo26!`.
 
 The hosted demo starts Visitor Parking at 10 available bays because two bays have example holds. The local walkthrough starts at 12.
 
+## Administration reporting
+
+Reports default to today in Nairobi time (EAT). Enter both dates to include every day from **From** through **Through**. The history list includes sessions with a recorded check-in or checkout during the window. Its search, last assigned zone and current status filters narrow the list. The gate activity totals cover all zones for the selected dates. A transfer keeps the same session, so it adds no entry or exit.
+
+Current occupancy is a live snapshot. It includes gate sessions that are still open and student bay simulations. Bookings and closures reduce availability. For example, a vehicle that arrived yesterday and remains parked counts toward current occupancy. If the gate records its departure today, it counts as an exit today.
+
+Use the visitor’s parking session number, such as `#12`, to find its reporting record. Reports omit visitor names, registrations, purposes, destinations and physical ID details. Gate operations still has the details needed to process active visits. The audit log can filter by date, event and parking session number. Transfer and correction events indicate when a reason was recorded without displaying its free text.
+
 ## Entity relationship diagram
 
 ```mermaid

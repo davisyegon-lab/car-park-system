@@ -71,6 +71,15 @@ details p { margin: .5rem 0; }
 .tabs { margin-bottom: .85rem; }
 #admin-report h3 { margin-top: 1rem; margin-bottom: .45rem; }
 #admin-report .stats { margin-top: .85rem; }
+.activity-filters { margin-block: .6rem 1rem; }
+.activity-filters legend { font-weight: 650; }
+.filter-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 0 .8rem; align-items: end; }
+.filter-fields label { margin-block: .4rem .65rem; }
+.filter-fields input, .filter-fields select { min-inline-size: 0; max-inline-size: 100%; }
+.filter-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .4rem; }
+.activity-status { margin-block: .5rem; }
+.activity-status.error { padding: .5rem .7rem; border-radius: 8px; }
+#report-window { font-weight: 650; }
 .notice { background: #e1f3ea; color: #164f3e; border: 1px solid #a8d7c4; border-radius: 8px; padding: .67rem .8rem; margin-bottom: 1rem; }
 #dashboard-status:empty, #login-error:empty { padding: 0; margin: 0; border: 0; }
 .error { background: #fff0ed; color: #8b2920; border-color: #f0c0b7; }
