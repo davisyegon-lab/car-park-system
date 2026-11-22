@@ -18,6 +18,9 @@ let activeSessions = [];
 let adminSection = 'zones';
 let dialogSubmit;
 let generation = 0;
+let sessionSync;
+const sessionEvents = typeof BroadcastChannel === 'function'
+    ? new BroadcastChannel(`strathmore-parking:${new URL('.', location.href).pathname}`) : null;
 let availabilityRequest;
 let dashboardStale = false;
 const mobileNavigation = matchMedia('(max-width: 700px)');
@@ -41,9 +44,10 @@ function notify(message, error = false, target = 'notice') {
 async function api(action, data, params = {}, signal) {
     const requestGeneration = generation;
     const query = new URLSearchParams({ action, ...params });
-    const options = data === undefined ? {} : {
+    const headers = ['state', 'availability'].includes(action) ? {} : { 'X-CSRF-Token': csrf };
+    const options = data === undefined ? { headers } : {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+        headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
     };
     const url = `api.php?${query}`;
@@ -55,22 +59,40 @@ async function api(action, data, params = {}, signal) {
     });
     if (requestGeneration !== generation || signal?.aborted) return null;
     if (!response.ok) {
-        if (currentUser && (response.status === 401 || (response.status === 403 && result.error?.startsWith('Your session token')))) {
-            const state = await api('state');
-            if (requestGeneration !== generation || signal?.aborted) return null;
-            if (state && !state.user) {
-                csrf = state.csrf;
-                updateUser(null);
-                if ($('action-dialog').open) $('action-dialog').close();
-                show('login', true);
-                notify('Your session ended. Sign in again.', true, 'login-error');
-                return null;
-            }
+        const sessionEnded = response.status === 401 && currentUser && action !== 'login';
+        const tokenChanged = response.status === 403 && result.error?.startsWith('Your session token');
+        if (sessionEnded || tokenChanged) {
+            await syncParkingSession();
+            return null;
         }
         throw Object.assign(new Error(result.error || 'Request failed.'), { status: response.status });
     }
     if (result.csrf) csrf = result.csrf;
     return result;
+}
+
+function syncParkingSession() {
+    sessionSync ??= (async () => {
+        const previousToken = csrf;
+        const state = await api('state');
+        if (!state || (state.csrf === previousToken && state.user?.id === currentUser?.id && state.user?.role === currentUser?.role)) return;
+        for (const id of ['action-dialog', 'tour-dialog']) {
+            if ($(id).open) $(id).close();
+        }
+        $('login-form').reset();
+        updateUser(null);
+        notify('');
+        if (state.user) {
+            updateUser(state.user);
+            show('dashboard', true);
+            notify(`This tab is now signed in as ${state.user.name}. Review the account before retrying.`);
+            void loadDashboard();
+        } else {
+            show('login', true);
+            notify('Your session ended or changed. Sign in again.', true, 'login-error');
+        }
+    })().finally(() => { sessionSync = null; });
+    return sessionSync;
 }
 
 function updateUser(user) {
@@ -618,6 +640,7 @@ $('login-form').addEventListener('submit', (event) => {
         if (!result) return;
         event.target.reset();
         updateUser(result.user);
+        sessionEvents?.postMessage('changed');
         show('dashboard', true);
         await loadDashboard();
     }, 'login-error');
@@ -625,6 +648,7 @@ $('login-form').addEventListener('submit', (event) => {
 $('logout').addEventListener('click', (event) => run(event, async () => {
     if (!await api('logout', {})) return;
     updateUser(null);
+    sessionEvents?.postMessage('changed');
     show('dashboard', true);
     notify('Signed out.');
     await loadDashboard();
@@ -820,6 +844,11 @@ $('tour-next').addEventListener('click', () => {
         step++;
         renderTour();
     }
+});
+
+sessionEvents?.addEventListener('message', () => {
+    if (!currentUser && screen !== 'login') return;
+    void syncParkingSession().catch(() => {});
 });
 
 const pollDashboard = () => { void loadDashboard({ poll: true }); };

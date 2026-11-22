@@ -33,7 +33,7 @@ function scenario(string $id, string $name, callable $test): void
     }
 }
 
-function startServer(string $schema): string
+function startServer(string $schema, int $idle = 30, int $maxAge = 28800, bool $publicDemo = false): string
 {
     global $servers;
     $socket = stream_socket_server('tcp://127.0.0.1:0');
@@ -41,7 +41,8 @@ function startServer(string $schema): string
     $address = stream_socket_get_name($socket, false);
     fclose($socket);
     $environment = array_merge(getenv(), [
-        'PARKING_DB_NAME' => $schema, 'PARKING_TEST_MODE' => '1', 'PARKING_TEST_TIMEOUT' => '4', 'PARKING_PUBLIC_DEMO' => '0',
+        'PARKING_DB_NAME' => $schema, 'PARKING_TEST_MODE' => '1', 'PARKING_TEST_TIMEOUT' => (string) $idle,
+        'PARKING_TEST_MAX_AGE' => (string) $maxAge, 'PARKING_PUBLIC_DEMO' => $publicDemo ? '1' : '0',
     ]);
     $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     $process = proc_open([PHP_BINARY, '-S', $address], [
@@ -73,6 +74,16 @@ final class Client
         $this->url = $url;
     }
 
+    public function session(): array
+    {
+        return [$this->cookie, $this->csrf];
+    }
+
+    public function useSession(array $session): void
+    {
+        [$this->cookie, $this->csrf] = $session;
+    }
+
     public function handle(string $action, ?array $body = null, array $query = [], bool $csrf = true): CurlHandle
     {
         $curl = curl_init($this->url . '?' . http_build_query(['action' => $action] + $query));
@@ -86,18 +97,34 @@ final class Client
                 return strlen($header);
             },
         ]);
+        $headers = ['X-CSRF-Token: ' . ($csrf ? $this->csrf : 'invalid')];
         if ($body !== null) {
             curl_setopt_array($curl, [
                 CURLOPT_POST => true, CURLOPT_POSTFIELDS => json_encode((object) $body, JSON_THROW_ON_ERROR),
-                CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-CSRF-Token: ' . ($csrf ? $this->csrf : 'invalid')],
             ]);
+            $headers[] = 'Content-Type: application/json';
         }
+        curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
         return $curl;
     }
 
     public function request(string $action, int $expected = 200, ?array $body = null, array $query = [], bool $csrf = true): array
     {
-        $curl = $this->handle($action, $body, $query, $csrf);
+        return $this->response($this->handle($action, $body, $query, $csrf), $action, $expected);
+    }
+
+    public function rawPost(string $action, string $body, string $type, int $expected): array
+    {
+        $curl = $this->handle($action);
+        curl_setopt_array($curl, [
+            CURLOPT_POST => true, CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => ["Content-Type: $type", 'X-CSRF-Token: ' . $this->csrf],
+        ]);
+        return $this->response($curl, $action, $expected);
+    }
+
+    private function response(CurlHandle $curl, string $action, int $expected): array
+    {
         $raw = curl_exec($curl);
         $code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
         check($raw !== false, "$action transport failed: " . curl_error($curl));
@@ -453,34 +480,135 @@ try {
         $admin->request('audit', 422, null, ['through' => '2024-03-01']);
         return 'Two in-window matches survived 101 newer events, and only structural audit metadata was returned.';
     });
-    scenario('S01', 'Injection protection and account administration', function () use ($admin, $url) {
+    scenario('S01', 'Input validation rejects malformed requests before saving', function () use ($admin, $security, $pdo) {
+        $zoneCount = (int) $pdo->query('SELECT COUNT(*) FROM parking_zones')->fetchColumn();
+        $visitorCount = (int) $pdo->query('SELECT COUNT(*) FROM visitors')->fetchColumn();
+        $auditCount = (int) $pdo->query('SELECT COUNT(*) FROM audit_logs')->fetchColumn();
+        foreach (['[]', 'true', 'null', '{'] as $body) {
+            $admin->rawPost('zone_create', $body, 'application/json', 400);
+        }
+        $admin->rawPost('zone_create', '{}', 'text/plain', 415);
+        $admin->rawPost('zone_create', str_repeat(' ', 16385), 'application/json', 413);
+        $admin->request('zone_create', 405);
+        $admin->request('availability', 405, []);
+        $admin->request('dashboard', 422, null, ['poll' => ['1']]);
+        $admin->request('zone_create', 422, ['name' => "Invalid\0", 'capacity' => 3]);
+        $admin->request('zone_create', 422, ['name' => 'Malformed', 'capacity' => '+3']);
+        $admin->request('zone_create', 422, ['name' => 'Malformed', 'capacity' => 3, 'active' => null]);
+        $admin->request('zone_create', 422, ['name' => 'Malformed', 'capacity' => 3, 'role' => 'admin']);
+        $admin->request('account_status', 422, ['id' => 2]);
+        $admin->request('account_status', 422, ['id' => 2, 'active' => 'false']);
+        $security->request('checkin', 422, driver(1, 'BAD AP', 3) + ['name' => 'Unexpected visitor']);
+        $security->request('checkin', 422, ['kind' => 'visitor', 'vehicle_plate' => 'BADVIS', 'zone_id' => 3,
+            'name' => 'Visitor', 'purpose' => 'Sample', 'destination' => 'Office', 'national_id' => 'FICTIONAL']);
+        $security->request('checkout', 422, ['id' => 1, 'expected_zone_id' => null]);
+        $admin->request('bay_manage', 422, ['zone_id' => 3, 'bay_number' => 2, 'current' => 'available', 'status' => 'booked']);
+        check((int) $pdo->query('SELECT COUNT(*) FROM parking_zones')->fetchColumn() === $zoneCount
+            && (int) $pdo->query('SELECT COUNT(*) FROM visitors')->fetchColumn() === $visitorCount
+            && (int) $pdo->query('SELECT COUNT(*) FROM audit_logs')->fetchColumn() === $auditCount
+            && (int) $pdo->query('SELECT active FROM users WHERE id = 2')->fetchColumn() === 1,
+            'A rejected request changed persisted records');
+        $zone = $admin->rawPost('zone_create', '{"name":"Inactive fixture","capacity":"3","active":false}',
+            'application/json; charset=UTF-8', 200)['id'];
+        $admin->request('zone_update', 200, ['id' => $zone, 'name' => 'Edited inactive fixture', 'capacity' => 4]);
+        check(!(bool) zone($admin->request('zones'), $zone)['active'], 'Updating an inactive zone reactivated it');
+        $admin->request('zone_delete', 200, ['id' => $zone]);
+        return 'Rejected invalid method, media type, JSON shape, body size and fields without changing records. Inactive zone stayed inactive.';
+    });
+    scenario('S02', 'Account changes revoke prior authorization', function () use ($admin, $url) {
         $client = new Client($url);
         $client->request('state');
-        $client->request('login', 401, ['email' => "' OR 1=1 --", 'password' => DEMO_PASSWORD]);
+        $client->request('login', 422, ['email' => 'invalid-address', 'password' => DEMO_PASSWORD]);
+        $client->request('login', 422, ['email' => 'staff@parking.test', 'password' => "test\0value"]);
         $client->login('staff');
+        $client->request('ams', 403);
+        $client->request('accounts', 403);
+        $client->request('bay_occupy', 403, ['zone_id' => 3, 'bay_number' => 1, 'current' => 'available']);
+        $admin->request('account_status', 409, ['id' => 4, 'active' => false]);
+        $admin->request('account_status', 200, ['id' => 2, 'active' => true]);
+        $client->request('dashboard');
+        $other = new Client($url);
+        $other->login('staff');
         $admin->request('account_status', 200, ['id' => 2, 'active' => false]);
         $client->request('dashboard', 401);
         $admin->request('account_status', 200, ['id' => 2, 'active' => true]);
-        $client->login('staff');
-        return 'SQL injection payload received 401; disabled staff access failed; staff signed in after reactivation.';
+        $other->request('dashboard', 401);
+        check($other->request('state')['user'] === null, 'A status change left an authenticated session');
+        $other->login('staff');
+        $other->request('dashboard');
+        return 'Forbidden role actions and self-deactivation were denied. Both existing sessions stayed revoked after reactivation, even without a request during suspension.';
     });
-    scenario('S02', 'Inactivity timeout and passive dashboard updates', function () use ($url) {
-        $client = new Client($url);
-        $client->login('student');
-        sleep(2);
-        $client->request('dashboard', 200, null, ['poll' => '1']);
-        sleep(2);
-        $client->request('dashboard', 401, null, ['poll' => '1']);
-        return 'A poll during the four-second test timeout returned 200; the next poll returned 401 after inactivity.';
-    });
-    scenario('S03', 'Login rate limiting', function () use ($url) {
+    scenario('S03', 'Sign-in and sign-out rotate cookies and CSRF tokens', function () use ($url) {
         $client = new Client($url);
         $client->request('state');
-        for ($i = 0; $i < 6; $i++) {
+        $anonymous = $client->session();
+        $login = $client->login('security');
+        $securitySession = $client->session();
+        check($securitySession[0] !== $anonymous[0] && $securitySession[1] !== $anonymous[1], 'Login did not rotate both identifiers');
+        check(!isset($login['user']['password_hash']) && !isset($login['user']['authorization_version']), 'Login included internal authorization fields');
+        $stale = new Client($url);
+        $stale->useSession($anonymous);
+        check($stale->request('state')['user'] === null, 'Anonymous cookie inherited sign-in');
+        $client->login('admin');
+        $adminSession = $client->session();
+        $stale->useSession([$adminSession[0], $securitySession[1]]);
+        $read = $stale->request('active', 403);
+        $write = $stale->request('checkin', 403, driver(1, 'STALE02', 3));
+        check($read === $write && str_starts_with($read['error'], 'Your session token'), 'Stale tab did not hit the session boundary');
+        check($client->request('active', 200, null, ['q' => 'STALE02'])['sessions'] === [], 'Stale tab wrote under the replacement account');
+        $stale->useSession($securitySession);
+        $stale->request('active', 401);
+        $client->request('logout', 200, []);
+        $signedOut = $client->session();
+        check($signedOut[0] !== $adminSession[0] && $signedOut[1] !== $adminSession[1], 'Logout did not rotate both identifiers');
+        $stale->useSession($adminSession);
+        $stale->request('accounts', 401);
+        return 'Pre-login, replaced and signed-out sessions stayed anonymous. A shared browser cookie with a stale tab token could neither read gate data nor record an entry.';
+    });
+    scenario('S04', 'Passive requests and absolute session expiry', function () use ($schema) {
+        $idle = new Client(startServer($schema, 5));
+        $idle->login('student');
+        usleep(2500000);
+        check($idle->request('state')['user']['role'] === 'student', 'Session expired before its idle limit');
+        $idle->request('dashboard', 200, null, ['poll' => '1']);
+        sleep(3);
+        $idle->request('dashboard', 401, null, ['poll' => '1']);
+
+        $absolute = new Client(startServer($schema, 15, 4));
+        $absolute->login('staff');
+        sleep(2);
+        $absolute->request('dashboard');
+        sleep(2);
+        $absolute->request('dashboard', 401);
+        return 'State and automatic polling did not renew the idle clock. Manual dashboard use could not extend the absolute deadline.';
+    });
+    scenario('S05', 'The hosted mode permits only gate officers and administrators', function () use ($schema, $url) {
+        $hosted = startServer($schema, publicDemo: true);
+        $formerStudent = new Client($url);
+        $formerStudent->login('student');
+        $formerStudent->target($hosted);
+        $formerStudent->request('dashboard', 401);
+        $public = new Client($hosted);
+        check(count($public->request('availability')['zones']) >= 3, 'Hosted guest availability broke');
+        $public->request('state');
+        $public->request('login', 403, ['email' => 'student@parking.test', 'password' => DEMO_PASSWORD]);
+        $public->request('login', 403, ['email' => 'staff@parking.test', 'password' => DEMO_PASSWORD]);
+        $public->login('security');
+        $public->request('active');
+        $public->request('audit', 403);
+        $public->login('admin');
+        $public->request('audit');
+        return 'Hosted guest map and both operator sign-ins worked. Student and staff could not sign in, and a local student session was rejected in hosted mode.';
+    });
+    scenario('S06', 'Login rate limiting', function () use ($url, $pdo) {
+        $pdo->exec('DELETE FROM login_attempts');
+        $client = new Client($url);
+        $client->request('state');
+        for ($i = 0; $i < 8; $i++) {
             $client->request('login', 401, ['email' => 'security@parking.test', 'password' => 'wrong']);
         }
         $client->request('login', 429, ['email' => 'admin@parking.test', 'password' => DEMO_PASSWORD]);
-        return 'Eight failed attempts across the suite triggered 429, including when a valid password was then supplied.';
+        return 'Eight unsuccessful valid-form sign-in attempts triggered 429, including when a valid password was then supplied.';
     });
 } catch (Throwable $error) {
     $failed++;

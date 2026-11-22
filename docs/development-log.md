@@ -1,5 +1,13 @@
 # Development log
 
+## 22 November 2026 EAT
+
+- Enforced action-specific HTTP methods, role checks and JSON object fields on the server. Invalid media types, oversized bodies, unexpected fields, explicit nulls for typed fields and control characters fail before any parking record is written. Editing an inactive zone without an active flag preserves its status.
+- Bound authenticated requests to the signed-in account and renewed the session identifier and CSRF token at sign-in and sign-out. Account status changes invalidate prior sessions, even if an account is reactivated before an old tab requests data. The status-change audit record supplies the authorization version using the existing schema.
+- Enforced a 30-minute idle limit and an eight-hour absolute lifetime. State checks and automatic dashboard refreshes do not renew the idle timer. Tabs clear drafts and protected views when the account changes. Previously issued sessions require a fresh sign-in.
+- PHP lint, JavaScript syntax and all 19 integration scenarios passed locally against PHP 8.4 and MariaDB 11.8. Chromium verified that a stale gate draft could not submit under a replacement account, sign-out cleared another tab’s report, and the hosted gate and bay workflows still worked.
+- Rotating a cookie and its request token together matters because browser tabs share cookies but keep their own memory. The old token lets the server identify a stale tab before accepting its request under the new account.
+
 ## 21 November 2026 EAT
 
 - Added Nairobi date windows, audit filters for event and parking session number, and report history filters for session number or campus registration, last assigned zone, and current status. Reports default to today. Audit defaults to recent events across all dates.

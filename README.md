@@ -31,7 +31,9 @@ General parking is first come, first served. Green means vacant, yellow previews
 | Gate officer | `security@parking.test` |
 | Administrator | `admin@parking.test` |
 
-All demo accounts use `ParkingDemo26!`.
+All demo accounts use `ParkingDemo26!`. The hosted demo uses the public map for students and staff and accepts sign-ins from gate officers and administrators.
+
+Sessions have a 30-minute idle limit and an eight-hour maximum lifetime. Automatic dashboard refreshes leave the idle timer alone. Signing out or changing accounts clears the previous session. Reactivating a disabled account requires that user to sign in again.
 
 ## Quick walkthrough
 

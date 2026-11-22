@@ -15,8 +15,9 @@ function fail(int $status, string $message): void
 
 function field(array $data, string $key, int $limit, bool $required = true): string
 {
-    $value = $data[$key] ?? '';
-    if (!is_string($value) || strlen($value = trim($value)) > $limit || ($required && $value === '')) {
+    $value = array_key_exists($key, $data) ? $data[$key] : '';
+    if (!is_string($value) || preg_match('/\p{Cc}/u', $value) !== 0
+        || strlen($value = trim($value)) > $limit || ($required && $value === '')) {
         fail(422, 'Check the ' . str_replace('_', ' ', $key) . ' field.');
     }
     return $value;
@@ -25,7 +26,7 @@ function field(array $data, string $key, int $limit, bool $required = true): str
 function integer(array $data, string $key, int $max = 4294967295): int
 {
     $value = $data[$key] ?? null;
-    $number = is_string($value) || is_int($value)
+    $number = is_int($value) || (is_string($value) && preg_match('/^[1-9][0-9]*$/D', $value))
         ? filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => $max]])
         : false;
     if ($number === false) {
@@ -34,36 +35,78 @@ function integer(array $data, string $key, int $max = 4294967295): int
     return $number;
 }
 
-function flag(array $data, string $key, bool $default = false): bool
+function flag(array $data, string $key, ?bool $default = null): bool
 {
-    $value = $data[$key] ?? $default;
+    $value = array_key_exists($key, $data) ? $data[$key] : $default;
     if (!is_bool($value)) {
-        fail(422, 'Invalid checkbox value.');
+        fail(422, 'Check the ' . str_replace('_', ' ', $key) . ' field.');
     }
     return $value;
+}
+
+function allowFields(array $data, array $allowed): void
+{
+    if (array_diff(array_keys($data), $allowed)) {
+        fail(422, 'This action received unexpected fields.');
+    }
+}
+
+function writeBody(string $action): array
+{
+    $mediaType = strtolower(trim(explode(';', $_SERVER['CONTENT_TYPE'] ?? '', 2)[0]));
+    if ($mediaType !== 'application/json') {
+        fail(415, 'Send the request as application/json.');
+    }
+    $body = file_get_contents('php://input', false, null, 0, 16385);
+    if ($body === false) {
+        fail(400, 'Could not read the request body.');
+    }
+    if (strlen($body) > 16384) {
+        fail(413, 'This request is too large.');
+    }
+    $decoded = json_decode($body, false, 32);
+    if (!$decoded instanceof stdClass) {
+        fail(400, 'Send a JSON object in the request body.');
+    }
+    $data = (array) $decoded;
+    if ($action !== 'checkin') {
+        allowFields($data, match ($action) {
+            'login' => ['email', 'password'],
+            'logout' => [],
+            'zone_create' => ['name', 'description', 'capacity', 'active'],
+            'zone_update' => ['id', 'name', 'description', 'capacity', 'active'],
+            'zone_delete' => ['id'],
+            'checkout' => ['id', 'expected_zone_id'],
+            'correct_checkout' => ['id', 'expected_zone_id', 'reason'],
+            'transfer' => ['id', 'expected_zone_id', 'zone_id', 'reason'],
+            'account_status' => ['id', 'active'],
+            'bay_occupy', 'bay_release' => ['zone_id', 'bay_number', 'current'],
+            'bay_manage' => ['zone_id', 'bay_number', 'current', 'status', 'booking_label'],
+        });
+    }
+    return $data;
 }
 
 function login(array $data): array
 {
     $email = strtolower(field($data, 'email', 150));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        fail(422, 'Enter a valid email address.');
+    }
     $password = $data['password'] ?? null;
-    if (!is_string($password) || $password === '' || strlen($password) > 72) {
+    if (!is_string($password) || $password === '' || strlen($password) > 72 || str_contains($password, "\0")) {
         fail(422, 'Check the password field.');
     }
     $key = hash('sha256', $_SERVER['REMOTE_ADDR'] ?? 'unknown');
     $now = time();
-    $operatorsOnly = getenv('PARKING_PUBLIC_DEMO') === '1';
-    $result = transaction(function () use ($email, $password, $key, $now, $operatorsOnly): array {
+    $result = transaction(function () use ($email, $password, $key, $now): array {
         sql('INSERT IGNORE INTO login_attempts (scope_key, window_started) VALUES (?, ?)', [$key, $now]);
         $rate = sql('SELECT attempts, window_started FROM login_attempts WHERE scope_key = ? FOR UPDATE', [$key])->fetch();
         $attempts = $now - (int) $rate['window_started'] < 900 ? (int) $rate['attempts'] : 0;
         if ($attempts >= 8) {
             return ['status' => 429, 'message' => 'Too many failed attempts. Try again in 15 minutes.'];
         }
-        $user = sql("SELECT u.id, u.name, u.email, u.role, u.password_hash
-            FROM users u LEFT JOIN mock_ams m ON m.id = u.ams_id
-            WHERE u.email = ? AND u.active = 1 AND (u.ams_id IS NULL OR (m.active = 1 AND m.category = u.role))",
-            [$email])->fetch();
+        $user = parkingAccount($email);
         $fallback = '$2y$10$EP645PfCvUHKb2qdOi7sIuztPloz9g8zDs6FE7p/g0nKY4U3qfulm';
         if (!password_verify($password, $user['password_hash'] ?? $fallback) || !$user) {
             sql('UPDATE login_attempts SET attempts = ?, window_started = ? WHERE scope_key = ?',
@@ -71,19 +114,22 @@ function login(array $data): array
             audit(null, 'login_failed', 'authentication', null);
             return ['status' => 401, 'message' => 'Email or password is incorrect.'];
         }
-        if ($operatorsOnly && !in_array($user['role'], ['admin', 'security'], true)) {
+        if (!parkingRoleAllowed($user['role'])) {
             return ['status' => 403, 'message' => 'Use the public map to try the sensor demo. Admin and security can sign in here.'];
         }
         audit((int) $user['id'], 'login', 'authentication', (int) $user['id']);
-        unset($user['password_hash']);
         return ['user' => $user];
     });
     if (isset($result['status'])) {
         fail($result['status'], $result['message']);
     }
-    session_regenerate_id(true);
-    $_SESSION = ['user_id' => $result['user']['id'], 'last_activity' => time(), 'csrf' => bin2hex(random_bytes(32))];
-    return $result + ['csrf' => $_SESSION['csrf']];
+    $user = $result['user'];
+    rotateParkingSession();
+    $signedIn = time();
+    $_SESSION += ['user_id' => $user['id'], 'role' => $user['role'],
+        'authorization_version' => (string) $user['authorization_version'],
+        'signed_in_at' => $signedIn, 'last_activity' => $signedIn];
+    return ['user' => publicAccount($user), 'csrf' => $_SESSION['csrf']];
 }
 
 function zones(bool $includeInactive = false, ?array $viewer = null): array
@@ -161,10 +207,16 @@ function changeBay(string $action, array $data, int $actor): array
         'bay_manage' => field($data, 'status', 16),
     };
     $adminStates = ['available', 'booked', 'unavailable'];
-    if ($action === 'bay_manage' && (!in_array($current, $adminStates, true) || !in_array($status, $adminStates, true))) {
+    $expected = match ($action) {
+        'bay_occupy' => ['available'],
+        'bay_release' => ['occupied'],
+        'bay_manage' => $adminStates,
+    };
+    if (!in_array($current, $expected, true) || ($action === 'bay_manage' && !in_array($status, $adminStates, true))) {
         fail(422, 'Choose a valid bay status.');
     }
-    $label = $status === 'booked' ? field($data, 'booking_label', 100) : null;
+    $booking = field($data, 'booking_label', 100, $status === 'booked');
+    $label = $status === 'booked' ? $booking : null;
     return transaction(function () use ($action, $actor, $zoneId, $number, $current, $status, $label): array {
         $zone = lockZone($zoneId);
         if (!$zone['active'] || $number > (int) $zone['capacity']) {
@@ -220,7 +272,7 @@ function changeZone(string $action, array $data, int $actor): array
         $name = field($data, 'name', 80);
         $description = field($data, 'description', 250, false);
         $capacity = integer($data, 'capacity', 9999);
-        $active = flag($data, 'active', true);
+        $active = flag($data, 'active', $zone === null || (bool) $zone['active']);
         if ($zone) {
             $occupied = occupancy($id);
             $bays = sql('SELECT COUNT(*) AS total, MAX(bay_number) AS highest FROM parking_bays WHERE zone_id = ?', [$id])->fetch();
@@ -260,28 +312,34 @@ function checkin(array $data, int $actor): array
         fail(422, 'Enter a vehicle registration of 3–16 letters, digits or hyphens.');
     }
     $kind = field($data, 'kind', 20);
-    if (!in_array($kind, ['institutional', 'visitor'], true)) {
-        fail(422, 'Choose a valid driver type.');
+    $driverFields = match ($kind) {
+        'visitor' => ['name', 'purpose', 'destination', 'id_inspected', 'id_retained'],
+        'institutional' => ['user_id'],
+        default => fail(422, 'Choose a valid driver type.'),
+    };
+    allowFields($data, ['kind', 'zone_id', 'vehicle_plate', ...$driverFields]);
+    $userId = $kind === 'institutional' ? integer($data, 'user_id') : null;
+    $visit = null;
+    if ($kind === 'visitor') {
+        $inspected = flag($data, 'id_inspected', false);
+        $retained = flag($data, 'id_retained', false);
+        if ($retained && !$inspected) {
+            fail(422, 'Confirm the physical ID was inspected before marking it retained.');
+        }
+        $visit = [field($data, 'name', 100), field($data, 'purpose', 120),
+            field($data, 'destination', 100), (int) $inspected, (int) $retained];
     }
-    return transaction(function () use ($data, $actor, $plate, $zoneId, $kind): array {
+    return transaction(function () use ($actor, $plate, $zoneId, $kind, $userId, $visit): array {
         $zone = lockZone($zoneId);
         if (sql('SELECT 1 FROM parking_sessions WHERE active_plate = ?', [$plate])->fetchColumn()) {
             fail(409, 'That vehicle already has an active parking session. Find it in Active sessions.');
         }
         requireSpace($zone);
-        $userId = $visitorId = null;
-        if ($kind === 'visitor') {
-            $inspected = flag($data, 'id_inspected');
-            $retained = flag($data, 'id_retained');
-            if ($retained && !$inspected) {
-                fail(422, 'Confirm the physical ID was inspected before marking it retained.');
-            }
-            sql('INSERT INTO visitors (name, purpose, destination, id_inspected, id_retained) VALUES (?,?,?,?,?)', [
-                field($data, 'name', 100), field($data, 'purpose', 120), field($data, 'destination', 100), (int) $inspected, (int) $retained,
-            ]);
+        $visitorId = null;
+        if ($visit !== null) {
+            sql('INSERT INTO visitors (name, purpose, destination, id_inspected, id_retained) VALUES (?,?,?,?,?)', $visit);
             $visitorId = (int) db()->lastInsertId();
         } else {
-            $userId = integer($data, 'user_id');
             if (!sql("SELECT 1 FROM users u JOIN mock_ams m ON m.id = u.ams_id AND m.category = u.role
                 WHERE u.id = ? AND u.active = 1 AND m.active = 1", [$userId])->fetchColumn()) {
                 fail(422, 'Select an active student or staff member from the simulated AMS.');
@@ -299,17 +357,18 @@ function changeSession(string $action, array $data, int $actor): array
 {
     $id = integer($data, 'id');
     $reason = $action === 'checkout' ? '' : field($data, 'reason', 250);
-    return transaction(function () use ($action, $data, $actor, $id, $reason): array {
+    $expectedZone = array_key_exists('expected_zone_id', $data) ? integer($data, 'expected_zone_id') : null;
+    $target = $action === 'transfer' ? integer($data, 'zone_id') : null;
+    return transaction(function () use ($action, $actor, $id, $reason, $expectedZone, $target): array {
         $session = sql('SELECT * FROM parking_sessions WHERE id = ? FOR UPDATE', [$id])->fetch();
         if (!$session || $session['checkout_at'] !== null) {
             fail(409, 'This parking session is no longer active.');
         }
         $source = (int) $session['zone_id'];
-        if (isset($data['expected_zone_id']) && integer($data, 'expected_zone_id') !== $source) {
+        if ($expectedZone !== null && $expectedZone !== $source) {
             fail(409, 'This vehicle moved to another zone. Review the refreshed active session before retrying.');
         }
-        if ($action === 'transfer') {
-            $target = integer($data, 'zone_id');
+        if ($target !== null) {
             if ($source === $target) {
                 fail(422, 'Choose a different parking zone.');
             }
@@ -476,25 +535,40 @@ function updateAccount(array $data, int $actor): array
         fail(409, 'You cannot change the status of your own account.');
     }
     return transaction(function () use ($id, $active, $actor): array {
-        $user = sql('SELECT id FROM users WHERE id = ? FOR UPDATE', [$id])->fetch();
+        $user = sql('SELECT id, active FROM users WHERE id = ? FOR UPDATE', [$id])->fetch();
         if (!$user) {
             fail(404, 'That account no longer exists.');
         }
-        sql('UPDATE users SET active = ? WHERE id = ?', [(int) $active, $id]);
-        audit($actor, 'account_status_changed', 'user', $id, ['active' => $active]);
+        if ((bool) $user['active'] !== $active) {
+            sql('UPDATE users SET active = ? WHERE id = ?', [(int) $active, $id]);
+            audit($actor, 'account_status_changed', 'user', $id, ['active' => $active]);
+        }
         return ['id' => $id];
     });
 }
 
+function actionPolicy(string $action): array
+{
+    $gate = ['admin', 'security'];
+    $admin = ['admin'];
+    $authenticated = ['student', 'staff', ...$gate];
+    return match ($action) {
+        'state', 'availability' => ['GET', []],
+        'login' => ['POST', []],
+        'dashboard' => ['GET', $authenticated],
+        'logout' => ['POST', $authenticated],
+        'ams', 'active' => ['GET', $gate],
+        'checkin', 'checkout', 'transfer', 'correct_checkout' => ['POST', $gate],
+        'zones', 'audit', 'report', 'accounts' => ['GET', $admin],
+        'zone_create', 'zone_update', 'zone_delete', 'account_status', 'bay_manage' => ['POST', $admin],
+        'bay_occupy', 'bay_release' => ['POST', ['student']],
+        default => fail(404, 'Unknown action.'),
+    };
+}
+
 try {
     $action = field($_GET, 'action', 30);
-    $reads = ['state', 'availability', 'dashboard', 'ams', 'active', 'zones', 'audit', 'report', 'accounts'];
-    $writes = ['login', 'logout', 'zone_create', 'zone_update', 'zone_delete', 'checkin', 'checkout', 'transfer', 'correct_checkout',
-        'account_status', 'bay_occupy', 'bay_release', 'bay_manage'];
-    if (!in_array($action, array_merge($reads, $writes), true)) {
-        fail(404, 'Unknown action.');
-    }
-    $method = in_array($action, $reads, true) ? 'GET' : 'POST';
+    [$method, $roles] = actionPolicy($action);
     if ($_SERVER['REQUEST_METHOD'] !== $method) {
         header("Allow: $method");
         fail(405, "Use $method for this action.");
@@ -504,52 +578,34 @@ try {
         return;
     }
     startParkingSession();
-    $data = [];
-    if ($method === 'POST') {
-        if (!hash_equals($_SESSION['csrf'], $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) {
-            fail(403, 'Your session token expired. Refresh and try again.');
-        }
-        $body = file_get_contents('php://input', false, null, 0, 16385);
-        if (strlen($body) > 16384) {
-            fail(413, 'This request is too large.');
-        }
-        $data = json_decode($body, true);
-        if (!is_array($data)) {
-            fail(400, 'Send a JSON request body.');
-        }
-    }
     $user = currentUser();
+    if ($roles && !$user) {
+        fail(401, 'Sign in to continue.');
+    }
+    $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? null;
+    // The UI also sends its token on protected reads to catch a changed account in another tab.
+    if (($method === 'POST' || ($roles && $token !== null)) && !hash_equals($_SESSION['csrf'], $token ?? '')) {
+        fail(403, 'Your session token changed. Refresh and try again.');
+    }
+    if ($roles && !in_array($user['role'], $roles, true)) {
+        fail(403, 'Your role does not have access to this action.');
+    }
+    $data = $method === 'POST' ? writeBody($action) : [];
     if ($action === 'state') {
-        if ($user) {
-            $_SESSION['last_activity'] = time();
-        }
         $result = ['user' => $user, 'csrf' => $_SESSION['csrf'], 'demo' => localDemo()];
     } elseif ($action === 'login') {
         $result = login($data);
     } else {
-        if (!$user) {
-            fail(401, 'Sign in to continue.');
-        }
-        $adminOnly = ['zones', 'zone_create', 'zone_update', 'zone_delete', 'audit', 'report', 'accounts', 'account_status', 'bay_manage'];
-        $gateOnly = ['ams', 'active', 'checkin', 'checkout', 'transfer', 'correct_checkout'];
-        if ((in_array($action, $adminOnly, true) && $user['role'] !== 'admin')
-            || (in_array($action, $gateOnly, true) && !in_array($user['role'], ['security', 'admin'], true))
-            || (in_array($action, ['bay_occupy', 'bay_release'], true) && $user['role'] !== 'student')) {
-            fail(403, 'Your role does not have access to this action.');
+        $poll = $action === 'dashboard' ? field($_GET, 'poll', 1, false) : '';
+        if ($poll !== '' && $poll !== '1') {
+            fail(422, 'Choose a valid dashboard refresh mode.');
         }
         $actor = (int) $user['id'];
-        if ($action !== 'logout') {
-            if ($action !== 'dashboard' || !isset($_GET['poll'])) {
-                $_SESSION['last_activity'] = time();
-            }
-            session_write_close();
-        }
         $result = match ($action) {
             'logout' => (function () use ($actor): array {
                 audit($actor, 'logout', 'authentication', $actor);
-                $_SESSION = [];
-                session_regenerate_id(true);
-                return ['csrf' => $_SESSION['csrf'] = bin2hex(random_bytes(32))];
+                rotateParkingSession();
+                return ['csrf' => $_SESSION['csrf']];
             })(),
             'dashboard' => dashboard($user),
             'ams' => ['users' => amsUsers()],
@@ -565,7 +621,11 @@ try {
             'account_status' => updateAccount($data, $actor),
             'bay_occupy', 'bay_release', 'bay_manage' => changeBay($action, $data, $actor),
         };
+        if ($action !== 'logout' && $poll === '') {
+            $_SESSION['last_activity'] = time();
+        }
     }
+    session_write_close();
     echo json_encode($result, JSON_THROW_ON_ERROR);
 } catch (RequestError $error) {
     http_response_code($error->getCode());
