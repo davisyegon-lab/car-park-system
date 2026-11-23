@@ -288,12 +288,16 @@ function renderAssignment() {
     const selected = $('checkin-zone').value;
     const zone = gateZones.find((item) => String(item.id) === (assignment?.id || selected));
     const phase = assignment?.phase || (zone ? 'pending' : '');
-    const message = !zone ? 'Choose a zone to preview the assignment.'
-        : phase === 'confirmed' ? `Check-in confirmed in ${zone.name}. ${zone.available} available.`
-        : phase === 'saving' ? `Recording the assignment in ${zone.name}…`
-        : `Assigning to ${zone.name}. Confirm with Check in.`;
+    const confirmed = phase === 'confirmed';
+    const fresh = confirmed && assignment.refreshed && zone;
+    const message = confirmed
+        ? `Check-in confirmed in ${assignment.zoneName}. Session #${assignment.sessionId}.${fresh ? ` ${zone.available} available.` : ''}`
+        : !zone ? 'Choose a zone to preview the assignment.'
+            : phase === 'saving' ? `Recording the assignment in ${zone.name}…`
+            : `Assigning to ${zone.name}. Confirm with Check in.`;
     if ($('assignment-state').textContent !== message) $('assignment-state').textContent = message;
-    $('assignment-map').innerHTML = zone ? parkingTiles(zone, phase === 'saving' ? 'pending' : phase, assignment?.previous) : '';
+    const showMap = zone && (!confirmed || fresh);
+    $('assignment-map').innerHTML = showMap ? parkingTiles(zone, phase === 'saving' ? 'pending' : phase, assignment?.previous) : '';
     $('assignment-map').dataset.phase = phase;
 }
 
@@ -338,6 +342,7 @@ async function loadDashboard({ poll = false, manual = false } = {}) {
             dashboardStale = false;
         } else if (page === 'gate') {
             gateZones = result.zones;
+            if (assignment?.phase === 'confirmed') assignment.refreshed = true;
             setOptions($('checkin-zone'), availableZones(), 'Select a zone');
             renderAssignment();
         }
@@ -718,9 +723,10 @@ $('checkin-form').addEventListener('submit', (event) => {
             throw error;
         }
         if (!result) return;
-        assignment.phase = 'confirmed';
+        assignment = { id: data.zone_id, phase: 'confirmed', previous, zoneName: result.zone, sessionId: result.id, refreshed: false };
         event.target.reset();
         toggleVisitorFields();
+        renderAssignment();
         $('ams-search').value = '';
         $('plate-search').value = '';
         notify(`Vehicle checked in to ${result.zone}. Session #${result.id}.`);

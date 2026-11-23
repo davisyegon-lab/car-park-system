@@ -1,5 +1,13 @@
 # Development log
 
+## 23 November 2026 EAT
+
+- Ran the hosted-mode walkthrough from the guest map through zone create and edit, visitor entry, duplicate rejection, transfer, corrected checkout, zone deactivation, reports and audit. Visitor Parking started with 10 available bays, fell to nine after entry and returned to 10 after the transfer and checkout. The report gained one entry and one exit. The same session yielded three audit events and no visitor-identifying fields in report history.
+- Reproduced a saved check-in that kept saying “Recording the assignment” when the next availability request failed. The gate now shows the confirmed session number immediately and waits for fresh availability before showing the map and count. A subsequent refresh recovered both in Chromium.
+- Reconciled the ERD and gate sequence against the actual MariaDB schema and PHP request flow. Both diagrams parsed and rendered in Mermaid. The handover records setup, acceptance steps, the temporary release process and the prototype’s verified limits.
+- PHP lint, JavaScript syntax and all 19 MariaDB integration scenarios passed locally. Chromium also passed keyboard and mobile navigation at 320 px, report and audit filtering, cross-tab session handling, and hosted operator workflows with fictional records.
+- The database save and the follow-up read can succeed independently. Present the committed session identifier as soon as the write succeeds so a refresh failure does not make an operator think the save is still pending.
+
 ## 22 November 2026 EAT
 
 - Enforced action-specific HTTP methods, role checks and JSON object fields on the server. Invalid media types, oversized bodies, unexpected fields, explicit nulls for typed fields and control characters fail before any parking record is written. Editing an inactive zone without an active flag preserves its status.

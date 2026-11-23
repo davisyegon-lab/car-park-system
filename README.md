@@ -54,13 +54,15 @@ Current occupancy is a live snapshot. It includes gate sessions that are still o
 
 Use the visitor’s parking session number, such as `#12`, to find its reporting record. Reports omit visitor names, registrations, purposes, destinations and physical ID details. Gate operations still has the details needed to process active visits. The audit log can filter by date, event and parking session number. Transfer and correction events indicate when a reason was recorded without displaying its free text.
 
+For setup, the acceptance walkthrough, and the verified limits, see [the handover](docs/handover.md).
+
 ## Entity relationship diagram
 
 ```mermaid
 erDiagram
     MOCK_AMS o|--o| USERS : links
-    USERS o|--o{ PARKING_SESSIONS : drives
-    VISITORS o|--|| PARKING_SESSIONS : visits
+    USERS o|--o{ PARKING_SESSIONS : identifies
+    VISITORS o|--o| PARKING_SESSIONS : identifies
     PARKING_ZONES ||--o{ PARKING_SESSIONS : contains
     PARKING_ZONES ||--o{ PARKING_BAYS : contains
     USERS o|--o| PARKING_BAYS : simulates_occupancy
@@ -69,14 +71,18 @@ erDiagram
     MOCK_AMS {
         int id PK
         string institutional_id UK
+        string name
         enum category
+        boolean active
     }
     USERS {
         int id PK
-        int ams_id FK
+        int ams_id FK, UK
+        string name
         string email UK
         enum role
         string password_hash
+        boolean active
     }
     VISITORS {
         int id PK
@@ -94,10 +100,10 @@ erDiagram
     PARKING_SESSIONS {
         int id PK
         int user_id FK
-        int visitor_id FK
+        int visitor_id FK, UK
         int zone_id FK
         string vehicle_plate
-        string active_plate UK
+        string active_plate UK "Generated for open sessions"
         datetime checkin_at
         datetime checkout_at
     }
@@ -109,16 +115,24 @@ erDiagram
         string booking_label
     }
     AUDIT_LOGS {
-        int id PK
+        bigint id PK
         int actor_id FK
         string action
         string entity_type
-        int entity_id
+        int entity_id "Reference interpreted by entity type"
+        datetime created_at
         json metadata
+    }
+    LOGIN_ATTEMPTS {
+        string scope_key PK
+        int attempts
+        bigint window_started
     }
 ```
 
-Each parking session belongs to either a campus user or a visitor and is assigned to one parking zone.
+Each parking session has exactly one driver reference, either a campus user or a visitor. A transfer updates the session’s zone. The generated registration on an open session prevents overlapping active sessions for that vehicle. One student may hold at most one simulated bay because `parking_bays.student_id` is unique.
+
+An audit event can have no actor, such as a failed sign-in. The entity reference is interpreted using its type and has no foreign key. The latest account status event supplies the version used to revoke existing PHP sign-ins. Login attempts are grouped by a hash of the request’s remote address.
 
 ## Gate check-in sequence
 
@@ -128,24 +142,45 @@ sequenceDiagram
     participant Gate as Gate operations
     participant API as PHP API
     participant DB as MariaDB
-    Officer->>Gate: Select driver type, vehicle and zone
+    Officer->>Gate: Select driver, registration and zone
     activate Gate
-    Gate->>API: Submit check-in
+    Gate->>API: POST check-in with session token
     activate API
-    API->>API: Verify role and validate fields
-    API->>DB: Start transaction and check zone capacity
-    activate DB
-    alt Space available and vehicle has no active session
-        API->>DB: Save parking session and audit event
-        API->>DB: Commit
-        API-->>Gate: Confirm check-in
-        Gate->>API: Refresh availability and active sessions
-    else Zone unavailable or vehicle already checked in
-        API->>DB: Roll back
-        API-->>Gate: Explain why check-in failed
+    API->>API: Verify role and token, validate and normalize fields
+    alt Invalid request
+        API-->>Gate: Return validation or access error
+    else Valid request
+        API->>DB: Begin transaction and lock zone
+        activate DB
+        API->>DB: Check active registration and available capacity
+        alt Eligible check-in
+            API->>DB: Verify campus user or insert visitor
+            API->>DB: Insert parking session and audit event
+            alt Both writes succeed
+                API->>DB: Commit
+                API-->>Gate: Return session ID and zone
+            else Operation fails
+                API->>DB: Roll back
+                API-->>Gate: Return error
+            end
+        else Zone missing, full or inactive, or registration already active
+            API->>DB: Roll back
+            API-->>Gate: Return error
+        end
+        deactivate DB
     end
-    deactivate DB
     deactivate API
-    Gate-->>Officer: Show result
+    alt Check-in committed
+        Gate-->>Officer: Confirm check-in
+        Gate->>API: Reload availability, active sessions and campus accounts
+        alt Availability reload succeeds
+            API-->>Gate: Return updated counts
+            Gate-->>Officer: Show confirmed availability
+        else Reload fails
+            Gate-->>Officer: Keep confirmation and show refresh error
+        end
+    else Check-in rejected
+        Gate-->>Officer: Show the error and keep the draft
+    end
     deactivate Gate
 ```
